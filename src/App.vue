@@ -6,9 +6,9 @@ import ParamPanel from '@/components/ParamPanel.vue';
 import PreviewPane from '@/components/PreviewPane.vue';
 import SettingsPanel from '@/components/SettingsPanel.vue';
 import TaskLog from '@/components/TaskLog.vue';
-import { addCovers, addTargets, applyDefaultCover } from '@/services/actions';
-import { clearCovers, clearTargets, moveCover, removeCover, removeTarget, store } from '@/stores/session';
-import { computed, onMounted, ref } from 'vue';
+import { addTargets, applyDefaultCover } from '@/services/actions';
+import { clearTargets, removeTarget, store } from '@/stores/session';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 
 const appVersion = __APP_VERSION__;
 
@@ -17,10 +17,72 @@ const showDocs = ref(false);
 /** 文档是否从设置面板打开：关闭时返回设置 */
 const docsReturn = ref(false);
 
-const coverDrag = ref<number | null>(null);
-const coverDragOver = ref<number | null>(null);
-
 onMounted(() => void applyDefaultCover());
+
+// ── 主题化提示浮板：接管原生 title，仅改变样式，位置沿用原生（锚定光标右下方） ──
+const tip = reactive({ show: false, text: '', x: 0, y: 0 });
+const tipEl = ref<HTMLElement>();
+const tipStyle = computed(() => ({ left: `${tip.x}px`, top: `${tip.y}px` }));
+
+function findTipTarget(node: EventTarget | null): HTMLElement | null {
+  let el = node as HTMLElement | null;
+  while (el && el instanceof HTMLElement && el !== document.body) {
+    if (el.dataset.tip || el.getAttribute('title')) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function onTipOver(e: MouseEvent): void {
+  const el = findTipTarget(e.target);
+  if (!el) return;
+  if (!el.dataset.tip) {
+    const t = el.getAttribute('title');
+    if (!t) return;
+    el.dataset.tip = t;
+    if (!el.getAttribute('aria-label')) el.setAttribute('aria-label', t);
+    el.removeAttribute('title');
+  }
+  const text = el.dataset.tip ?? '';
+  if (!text) return;
+  tip.text = text;
+  tip.x = e.clientX + 12;
+  tip.y = e.clientY + 20;
+  tip.show = true;
+  void nextTick(() => {
+    const node = tipEl.value;
+    if (!node) return;
+    const r = node.getBoundingClientRect();
+    if (tip.x + r.width > window.innerWidth - 4) tip.x = Math.max(4, e.clientX - r.width - 12);
+    if (tip.y + r.height > window.innerHeight - 4) tip.y = Math.max(4, e.clientY - r.height - 12);
+  });
+}
+
+function hideTip(): void {
+  tip.show = false;
+}
+
+function onTipOut(e: MouseEvent): void {
+  const el = findTipTarget(e.target);
+  if (!el) return;
+  const to = e.relatedTarget as Node | null;
+  if (to && el.contains(to)) return;
+  hideTip();
+}
+
+onMounted(() => {
+  document.addEventListener('mouseover', onTipOver);
+  document.addEventListener('mouseout', onTipOut);
+  // 目标被移除 / 弹窗打开 / 滚动时不会触发 mouseout，需在这些时机强制收起
+  document.addEventListener('click', hideTip, true);
+  window.addEventListener('scroll', hideTip, true);
+});
+onBeforeUnmount(() => {
+  document.removeEventListener('mouseover', onTipOver);
+  document.removeEventListener('mouseout', onTipOut);
+  document.removeEventListener('click', hideTip, true);
+  window.removeEventListener('scroll', hideTip, true);
+});
 
 const status = computed(() => (store.busy ? '处理中…' : '就绪'));
 
@@ -52,12 +114,6 @@ function closeDocs(): void {
     showSettings.value = true;
   }
 }
-
-function onCoverDrop(i: number): void {
-  if (coverDrag.value !== null && coverDrag.value !== i) moveCover(coverDrag.value, i);
-  coverDrag.value = null;
-  coverDragOver.value = null;
-}
 </script>
 
 <template>
@@ -77,6 +133,15 @@ function onCoverDrop(i: number): void {
 
     <main class="main">
       <aside class="side">
+        <div class="tabs op-tabs">
+          <div class="tab" :class="{ active: store.op === 'encrypt' }" @click="store.op = 'encrypt'">
+            加密
+          </div>
+          <div class="tab" :class="{ active: store.op === 'decrypt' }" @click="store.op = 'decrypt'">
+            解密
+          </div>
+        </div>
+
         <div class="panel">
           <div class="panel-title">─ 输入</div>
           <DropZone label="目标图像" multiple :hint="targetHint" @files="addTargets" />
@@ -91,46 +156,9 @@ function onCoverDrop(i: number): void {
               <button class="link" @click="clearTargets">清空</button>
             </div>
           </div>
-        </div>
-
-        <div v-if="store.op === 'encrypt' && store.mode === 'overlay'" class="panel">
-          <div class="panel-title">─ 混淆图层</div>
-          <DropZone label="混淆图像" hint="拖入 / 点击追加图层" multiple @files="addCovers" />
-          <div v-if="store.covers.length" class="file-list">
-            <div
-              v-for="(c, i) in store.covers"
-              :key="c.name + i"
-              class="item draggable"
-              :class="{ 'drag-over': coverDragOver === i && coverDrag !== i }"
-              draggable="true"
-              @dragstart="coverDrag = i"
-              @dragend="coverDrag = null; coverDragOver = null"
-              @dragenter.prevent="coverDragOver = i"
-              @dragleave="coverDragOver === i && (coverDragOver = null)"
-              @dragover.prevent
-              @drop.prevent="onCoverDrop(i)"
-            >
-              <span class="grip" title="拖动调整层序">≡</span>
-              <span class="dims">L{{ i + 1 }}</span>
-              <span class="fname" :title="c.name">{{ c.name }}</span>
-              <button class="link del" title="移除" @click="removeCover(i)">×</button>
-            </div>
-            <div class="item foot">
-              <span>共 {{ store.covers.length }} 层</span>
-              <button class="link" @click="clearCovers">清空</button>
-            </div>
-          </div>
-          <div v-if="store.covers.length" class="row" style="margin-top: 8px; margin-bottom: 0">
-            <label>目标图所在层</label>
-            <select v-model.number="store.targetLayer">
-              <option
-                v-for="p in store.covers.length + 1"
-                :key="p"
-                :value="store.covers.length + 1 - p"
-              >
-                第 {{ p }} 层{{ p === 1 ? '（顶层）' : p === store.covers.length + 1 ? '（底层）' : '' }}
-              </option>
-            </select>
+          <div v-if="store.op === 'encrypt'" class="row inline" style="margin: 10px 0 0">
+            <input id="pack" v-model="store.pack" type="checkbox" />
+            <label for="pack">多图合并为一张（解密时还原全部原图）</label>
           </div>
         </div>
 
@@ -156,5 +184,7 @@ function onCoverDrop(i: number): void {
 
     <SettingsPanel v-if="showSettings" @close="showSettings = false" @docs="openDocsFromSettings" />
     <DocsPanel v-if="showDocs" @close="closeDocs" />
+
+    <div v-if="tip.show" ref="tipEl" class="tooltip" :style="tipStyle">{{ tip.text }}</div>
   </div>
 </template>

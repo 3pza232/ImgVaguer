@@ -2,9 +2,9 @@
 import { generateKeyFile, parseKeyFile, randomKeySeed } from '@/core/keyfile';
 import { encodePng } from '@/core/png';
 import type { ImgVaguerParams, Raster } from '@/core/types';
-import { detail, log, saveSettings, settings, store, type KeyFileRef, type ResultItem } from '@/stores/session';
+import { detail, log, saveSettings, settings, store, type KeyFileRef, type ResultBatch, type ResultItem } from '@/stores/session';
 import { zipSync } from 'fflate';
-import { decryptImage, encryptImage, readHeader } from './engine';
+import { decryptImage, encryptImage, encryptPack, readHeader } from './engine';
 import { degradeRaster, downloadBytes, fileToRaster, rasterToUrl, resizeRaster } from './image-io';
 
 function buildParams(): ImgVaguerParams {
@@ -12,6 +12,7 @@ function buildParams(): ImgVaguerParams {
     protection: store.protection,
     password: store.password,
     iterations: store.iterations,
+    pack: store.pack,
   };
   return store.mode === 'scramble'
     ? {
@@ -95,38 +96,35 @@ export async function runEncrypt(): Promise<void> {
   // 密钥文件保护：整批共用一枚种子，随该批结果一同保存以便随时下载
   const extSeed = store.protection === 'keyfile' ? randomKeySeed() : undefined;
   const keyFile: KeyFileRef | null = extSeed
-    ? { name: 'imgvaguer-key.ivkey', text: generateKeyFile(extSeed) }
+    ? { name: 'imgvaguer-key.ivkey', text: await generateKeyFile(extSeed) }
     : null;
   store.batches.push({ items: [], keyFile });
   store.batchIndex = store.batches.length - 1;
   const batch = store.batches[store.batches.length - 1];
+  const pack = params.pack === true;
   let okCount = 0;
-  log(`开始加密 ${store.targets.length} 项 [${params.mode}/${store.protection}]`);
+  log(`开始加密 ${store.targets.length} 项 [${params.mode}/${store.protection}${pack ? '/合并' : ''}]`);
   try {
-    for (const t of store.targets) {
-      const t0 = performance.now();
-      try {
-        let coverRasters: Raster[] = [];
-        if (params.mode === 'overlay') {
-          coverRasters = store.covers.map((c) =>
-            degradeRaster(
-              resizeRaster(c.raster, t.raster.width, t.raster.height, params.fit),
-              params.coverQuality ?? 1,
-            ),
-          );
+    if (pack) {
+      okCount = await runEncryptPack(batch, params, extSeed);
+    } else {
+      for (const t of store.targets) {
+        const t0 = performance.now();
+        try {
+          const coverRasters = buildCovers(params, t.raster.width, t.raster.height);
+          const out = await encryptImage(t.raster, params, coverRasters, extSeed, detail);
+          okCount++;
+          batch.items.push({
+            name: suffixed(t.name, '.imgvaguer.png'),
+            bytes: out.bytes,
+            url: rasterToUrl(out.outRaster),
+            ok: true,
+          });
+          log(`加密 ${t.name} -> ${(out.bytes.length / 1024).toFixed(1)}KB (${(performance.now() - t0).toFixed(0)}ms)`);
+        } catch (e) {
+          batch.items.push({ name: t.name, bytes: null, url: '', ok: false, error: (e as Error).message });
+          log(`失败 ${t.name}: ${(e as Error).message}`);
         }
-        const out = await encryptImage(t.raster, params, coverRasters, extSeed, detail);
-        okCount++;
-        batch.items.push({
-          name: suffixed(t.name, '.imgvaguer.png'),
-          bytes: out.bytes,
-          url: rasterToUrl(out.outRaster),
-          ok: true,
-        });
-        log(`加密 ${t.name} -> ${(out.bytes.length / 1024).toFixed(1)}KB (${(performance.now() - t0).toFixed(0)}ms)`);
-      } catch (e) {
-        batch.items.push({ name: t.name, bytes: null, url: '', ok: false, error: (e as Error).message });
-        log(`失败 ${t.name}: ${(e as Error).message}`);
       }
     }
     if (keyFile && okCount > 0) {
@@ -134,6 +132,41 @@ export async function runEncrypt(): Promise<void> {
     }
   } finally {
     store.busy = false;
+  }
+}
+
+/** 依当前覆盖层设置，把覆盖图缩放到目标尺寸 */
+function buildCovers(params: ImgVaguerParams, width: number, height: number): Raster[] {
+  if (params.mode !== 'overlay') return [];
+  return store.covers.map((c) =>
+    degradeRaster(resizeRaster(c.raster, width, height, params.fit), params.coverQuality ?? 1),
+  );
+}
+
+/** 多图合并：整批原图 -> 单张输出 */
+async function runEncryptPack(
+  batch: ResultBatch,
+  params: ImgVaguerParams,
+  extSeed: Uint8Array | undefined,
+): Promise<number> {
+  const t0 = performance.now();
+  const first = store.targets[0];
+  try {
+    const images = store.targets.map((t) => ({ name: t.name, raster: t.raster }));
+    const covers = buildCovers(params, first.raster.width, first.raster.height);
+    const out = await encryptPack(images, params, covers, extSeed, detail);
+    batch.items.push({
+      name: suffixed(first.name, '.imgvaguer.png'),
+      bytes: out.bytes,
+      url: rasterToUrl(out.outRaster),
+      ok: true,
+    });
+    log(`合并加密 ${store.targets.length} 张 -> ${(out.bytes.length / 1024).toFixed(1)}KB (${(performance.now() - t0).toFixed(0)}ms)`);
+    return 1;
+  } catch (e) {
+    batch.items.push({ name: first.name, bytes: null, url: '', ok: false, error: (e as Error).message });
+    log(`合并加密失败: ${(e as Error).message}`);
+    return 0;
   }
 }
 
@@ -160,16 +193,17 @@ export async function runDecrypt(): Promise<void> {
       try {
         const bytes = new Uint8Array(await t.file.arrayBuffer());
         if (!readHeader(bytes)) throw new Error('非 ImgVaguer 图像');
-        // 像素由引擎从 PNG 内部无损解出；保护方式由尝试凭据自动判定
-        const restored = await decryptImage(bytes, store.password || undefined, store.keyFile?.seed, detail);
-        const out = encodePng(restored);
-        batch.items.push({
-          name: suffixed(t.name, '.restored.png'),
-          bytes: out,
-          url: rasterToUrl(restored),
-          ok: true,
+        // 像素由引擎从 PNG 内部无损解出；保护方式由尝试凭据自动判定，多图合并自动展开
+        const images = await decryptImage(bytes, store.password || undefined, store.keyFile?.seed, detail);
+        const multi = images.length > 1;
+        images.forEach((img, i) => {
+          const out = encodePng(img.raster);
+          const name = img.name
+            ? suffixed(img.name, '.restored.png')
+            : suffixed(t.name, multi ? `.${i + 1}.restored.png` : '.restored.png');
+          batch.items.push({ name, bytes: out, url: rasterToUrl(img.raster), ok: true });
         });
-        log(`还原 ${t.name} (${(performance.now() - t0).toFixed(0)}ms)`);
+        log(`还原 ${t.name}${multi ? ` -> ${images.length} 张` : ''} (${(performance.now() - t0).toFixed(0)}ms)`);
       } catch (e) {
         batch.items.push({ name: t.name, bytes: null, url: '', ok: false, error: (e as Error).message });
         log(`失败 ${t.name}: ${(e as Error).message}`);

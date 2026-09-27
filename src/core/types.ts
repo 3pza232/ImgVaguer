@@ -15,6 +15,8 @@ interface BaseParams {
   password: string;
   /** PBKDF2-SHA256 迭代次数 */
   iterations: number;
+  /** 多图合并：把本批全部目标图并入一张输出（仅密钥文件保护下生效） */
+  pack?: boolean;
 }
 
 export interface ScrambleParams extends BaseParams {

@@ -39,6 +39,8 @@ export interface LogLine {
 
 export interface SavedParams {
   protection: Protection;
+  /** 多图合并（仅密钥文件保护下生效） */
+  pack: boolean;
   iterations: number;
   blockSize: 8 | 16 | 32;
   noise: number;
@@ -67,6 +69,7 @@ const SETTINGS_KEY = 'imgvaguer.settings.v1';
 
 const defaultParams: SavedParams = {
   protection: 'password',
+  pack: false,
   iterations: 200000,
   blockSize: 16,
   noise: 16,
@@ -112,6 +115,8 @@ export const store = reactive({
   op: 'encrypt' as 'encrypt' | 'decrypt',
   mode: 'scramble' as Mode,
   protection: 'password' as Protection,
+  /** 多图合并（仅密钥文件保护下生效） */
+  pack: false,
   password: '',
   iterations: 200000,
   blockSize: 16 as 8 | 16 | 32,
@@ -148,6 +153,7 @@ if (settings.rememberParams) {
   const p = settings.params;
   Object.assign(store, {
     protection: p.protection,
+    pack: p.pack,
     iterations: p.iterations,
     blockSize: p.blockSize,
     noise: p.noise,
@@ -175,6 +181,7 @@ applyDefaultPassword();
 export function saveSettings(): void {
   settings.params = {
     protection: store.protection,
+    pack: store.pack,
     iterations: store.iterations,
     blockSize: store.blockSize,
     noise: store.noise,
@@ -197,6 +204,7 @@ export function saveSettings(): void {
 watch(
   () => [
     store.protection,
+    store.pack,
     store.iterations,
     store.blockSize,
     store.noise,

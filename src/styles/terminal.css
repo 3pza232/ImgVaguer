@@ -312,6 +312,24 @@ input[type="range"]::-moz-range-thumb {
 
 .titlebar-right { display: flex; align-items: center; gap: 12px; }
 
+/* 顶栏操作页签（加密 / 解密） */
+.op-tabs { margin-bottom: 0; }
+
+/* 主题化提示浮板（取代浏览器原生 title 提示） */
+.tooltip {
+  position: fixed;
+  z-index: 200;
+  pointer-events: none;
+  background: var(--sunken);
+  border: 1px solid var(--line-hi);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 3px 7px;
+  white-space: nowrap;
+  box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.4);
+}
+
 .btn.mini { flex: none; padding: 3px 10px; }
 
 /* 纯色图标按钮（标题栏齿轮） */

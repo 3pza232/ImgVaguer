@@ -1,20 +1,21 @@
 <script setup lang="ts">
 import DropZone from '@/components/DropZone.vue';
-import { run, setKeyFile } from '@/services/actions';
-import { clearKeyFile, store } from '@/stores/session';
+import { addCovers, run, setKeyFile } from '@/services/actions';
+import { clearCovers, clearKeyFile, moveCover, removeCover, store } from '@/stores/session';
+import { ref } from 'vue';
+
+const coverDrag = ref<number | null>(null);
+const coverDragOver = ref<number | null>(null);
+
+function onCoverDrop(i: number): void {
+  if (coverDrag.value !== null && coverDrag.value !== i) moveCover(coverDrag.value, i);
+  coverDrag.value = null;
+  coverDragOver.value = null;
+}
 </script>
 
 <template>
   <div class="panel">
-    <div class="tabs">
-      <div class="tab" :class="{ active: store.op === 'encrypt' }" @click="store.op = 'encrypt'">
-        加密
-      </div>
-      <div class="tab" :class="{ active: store.op === 'decrypt' }" @click="store.op = 'decrypt'">
-        解密
-      </div>
-    </div>
-
     <template v-if="store.op === 'encrypt'">
       <div class="panel-title">─ 混淆方式</div>
       <div class="tabs">
@@ -23,6 +24,46 @@ import { clearKeyFile, store } from '@/stores/session';
         </div>
         <div class="tab" :class="{ active: store.mode === 'overlay' }" @click="store.mode = 'overlay'">
           覆盖合成
+        </div>
+      </div>
+      <div v-if="store.mode === 'overlay'" style="margin-bottom: 10px">
+        <div class="panel-title">─ 混淆图层</div>
+        <DropZone label="混淆图像" hint="拖入 / 点击追加图层" multiple @files="addCovers" />
+        <div v-if="store.covers.length" class="file-list">
+          <div
+            v-for="(c, i) in store.covers"
+            :key="c.name + i"
+            class="item draggable"
+            :class="{ 'drag-over': coverDragOver === i && coverDrag !== i }"
+            draggable="true"
+            @dragstart="coverDrag = i"
+            @dragend="coverDrag = null; coverDragOver = null"
+            @dragenter.prevent="coverDragOver = i"
+            @dragleave="coverDragOver === i && (coverDragOver = null)"
+            @dragover.prevent
+            @drop.prevent="onCoverDrop(i)"
+          >
+            <span class="grip" title="拖动调整层序">≡</span>
+            <span class="dims">L{{ i + 1 }}</span>
+            <span class="fname" :title="c.name">{{ c.name }}</span>
+            <button class="link del" title="移除" @click="removeCover(i)">×</button>
+          </div>
+          <div class="item foot">
+            <span>共 {{ store.covers.length }} 层</span>
+            <button class="link" @click="clearCovers">清空</button>
+          </div>
+        </div>
+        <div v-if="store.covers.length" class="row" style="margin-top: 8px; margin-bottom: 0">
+          <label>目标图所在层</label>
+          <select v-model.number="store.targetLayer">
+            <option
+              v-for="p in store.covers.length + 1"
+              :key="p"
+              :value="store.covers.length + 1 - p"
+            >
+              第 {{ p }} 层{{ p === 1 ? '（顶层）' : p === store.covers.length + 1 ? '（底层）' : '' }}
+            </option>
+          </select>
         </div>
       </div>
 

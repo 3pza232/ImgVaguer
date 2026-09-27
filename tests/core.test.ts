@@ -12,12 +12,12 @@ import {
   type MetaFields,
 } from '@/core/header';
 import { deriveSubKeys, type SubKeys } from '@/core/kdf';
-import { generateKeyFile, parseKeyFile, randomKeySeed } from '@/core/keyfile';
+import { generateKeyFile, KEY_MAGIC, parseKeyFile, randomKeySeed } from '@/core/keyfile';
 import { composite, compositeLayers } from '@/core/overlay';
 import { decodePngRgba, encodePng, extractPngChunk } from '@/core/png';
 import { scrambleImage, unscrambleImage, type BlockSize } from '@/core/scramble';
 import type { OverlayParams, Raster, ScrambleParams } from '@/core/types';
-import { decryptImage, encryptImage, readHeader } from '@/services/engine';
+import { decryptImage, encryptImage, encryptPack, readHeader } from '@/services/engine';
 import { describe, expect, it } from 'vitest';
 
 function hex(b: Uint8Array): string {
@@ -191,6 +191,7 @@ describe('header', () => {
   it('meta：字段与载荷往返', () => {
     const fields: MetaFields = {
       mode: 'overlay',
+      pack: false,
       protection: 'keyfile',
       p1: 95,
       p2: 1,
@@ -211,17 +212,26 @@ describe('header', () => {
 });
 
 describe('keyfile', () => {
-  it('生成/解析往返', () => {
+  it('生成/解析往返（新格式，多行 + 指纹）', async () => {
     const seed = randomKeySeed();
-    const text = generateKeyFile(seed);
-    expect(text.startsWith('IMGVAGUER-KEY v1')).toBe(true);
+    const text = await generateKeyFile(seed);
+    expect(text.startsWith(KEY_MAGIC)).toBe(true);
+    expect(text).toContain('fingerprint:');
+    expect(text.split('\n').length).toBeGreaterThan(4);
     expect(parseKeyFile(text)).toEqual(seed);
+  });
+
+  it('兼容旧版单行格式', () => {
+    const seed = randomKeySeed();
+    let bin = '';
+    for (const b of seed) bin += String.fromCharCode(b);
+    expect(parseKeyFile(`IMGVAGUER-KEY v1\n${btoa(bin)}`)).toEqual(seed);
   });
 
   it('非法文件拒绝', () => {
     expect(() => parseKeyFile('hello\nAAAA')).toThrow();
-    expect(() => parseKeyFile('IMGVAGUER-KEY v1\n!!!')).toThrow();
-    expect(() => parseKeyFile('IMGVAGUER-KEY v1\nQUJD')).toThrow('密钥长度非法');
+    expect(() => parseKeyFile('IMGVAGUER KEYFILE v1\n--\n!!!')).toThrow();
+    expect(() => parseKeyFile('IMGVAGUER KEYFILE v1\n--\nQUJD')).toThrow('密钥长度非法');
   });
 });
 
@@ -233,8 +243,8 @@ describe('engine', () => {
     const params: ScrambleParams = { ...base, mode: 'scramble', protection: 'none', password: '', blockSize: 16, noise: 24 };
     const out = await encryptImage(src, params);
     expect(readHeader(out.bytes)?.version).toBe(VERSION);
-    const dec = await decryptImage(out.bytes);
-    expect(dec.data).toEqual(src.data);
+    const [dec] = await decryptImage(out.bytes);
+    expect(dec.raster.data).toEqual(src.data);
   });
 
   it('去指纹：数据块不含品牌标识与明文参数', async () => {
@@ -255,8 +265,8 @@ describe('engine', () => {
     const src = randomRaster(64, 64);
     const params: ScrambleParams = { ...base, mode: 'scramble', protection: 'password', password: 's3cret', blockSize: 8, noise: 8 };
     const out = await encryptImage(src, params);
-    const dec = await decryptImage(out.bytes, 's3cret');
-    expect(dec.data).toEqual(src.data);
+    const [dec] = await decryptImage(out.bytes, 's3cret');
+    expect(dec.raster.data).toEqual(src.data);
     await expect(decryptImage(out.bytes, 'wrong')).rejects.toThrow('口令/密钥错误或数据已损坏');
   });
 
@@ -266,8 +276,8 @@ describe('engine', () => {
     const params: ScrambleParams = { ...base, mode: 'scramble', protection: 'keyfile', password: '', blockSize: 16, noise: 16 };
     const out = await encryptImage(src, params, [], seed);
     expect(readHeader(out.bytes)?.version).toBe(VERSION);
-    const dec = await decryptImage(out.bytes, undefined, seed);
-    expect(dec.data).toEqual(src.data);
+    const [dec] = await decryptImage(out.bytes, undefined, seed);
+    expect(dec.raster.data).toEqual(src.data);
     await expect(decryptImage(out.bytes)).rejects.toThrow('密钥文件');
     await expect(decryptImage(out.bytes, undefined, randomKeySeed())).rejects.toThrow();
   });
@@ -279,8 +289,8 @@ describe('engine', () => {
     const a = await encryptImage(src, params, [], seed);
     const b = await encryptImage(src, params, [], seed);
     expect(a.outRaster.data).not.toEqual(b.outRaster.data);
-    expect((await decryptImage(a.bytes, undefined, seed)).data).toEqual(src.data);
-    expect((await decryptImage(b.bytes, undefined, seed)).data).toEqual(src.data);
+    expect((await decryptImage(a.bytes, undefined, seed))[0].raster.data).toEqual(src.data);
+    expect((await decryptImage(b.bytes, undefined, seed))[0].raster.data).toEqual(src.data);
   });
 
   it('scramble 专业参数经头部自动往返', async () => {
@@ -290,8 +300,8 @@ describe('engine', () => {
       blockSize: 16, noise: 24, rounds: 2, globalPerm: true, sbox: true, rowshift: true,
     };
     const out = await encryptImage(src, params);
-    const dec = await decryptImage(out.bytes, 'pro');
-    expect(dec.data).toEqual(src.data);
+    const [dec] = await decryptImage(out.bytes, 'pro');
+    expect(dec.raster.data).toEqual(src.data);
   });
 
   it('overlay 口令：原图从加密载荷逐位还原', async () => {
@@ -300,8 +310,8 @@ describe('engine', () => {
     const params: OverlayParams = { ...base, mode: 'overlay', protection: 'password', password: 'pw', opacity: 1, fit: 'cover' };
     const out = await encryptImage(target, params, [cover]);
     expect(out.outRaster.data).toEqual(cover.data); // 视觉上完全被覆盖
-    const dec = await decryptImage(out.bytes, 'pw');
-    expect(dec.data).toEqual(target.data);
+    const [dec] = await decryptImage(out.bytes, 'pw');
+    expect(dec.raster.data).toEqual(target.data);
     await expect(decryptImage(out.bytes, 'nope')).rejects.toThrow();
   });
 
@@ -311,8 +321,8 @@ describe('engine', () => {
     const params: OverlayParams = { ...base, mode: 'overlay', protection: 'none', password: '', opacity: 1, fit: 'cover', targetLayer: 1 };
     const out = await encryptImage(target, params, [c1]);
     expect(out.outRaster.data).toEqual(target.data); // 真图在最上层可见
-    const dec = await decryptImage(out.bytes);
-    expect(dec.data).toEqual(target.data);
+    const [dec] = await decryptImage(out.bytes);
+    expect(dec.raster.data).toEqual(target.data);
   });
 
   it('像素无损解码：原样重编码后仍可逐位还原', async () => {
@@ -320,8 +330,8 @@ describe('engine', () => {
     const params: ScrambleParams = { ...base, mode: 'scramble', protection: 'password', password: 'pw', blockSize: 8, noise: 12 };
     const out = await encryptImage(src, params);
     const reencoded = encodePng(out.outRaster, { type: CHUNK_TYPE, data: extractPngChunk(out.bytes, CHUNK_TYPE)! });
-    const dec = await decryptImage(reencoded, 'pw');
-    expect(dec.data).toEqual(src.data);
+    const [dec] = await decryptImage(reencoded, 'pw');
+    expect(dec.raster.data).toEqual(src.data);
   });
 
   it('密文认证：像素被改动即拒绝', async () => {
@@ -341,5 +351,48 @@ describe('engine', () => {
     const chunk = extractPngChunk(out.bytes, CHUNK_TYPE)!;
     chunk[chunk.length - 1] ^= 0xff; // 翻转 chunk 内 MAC 末字节
     await expect(decryptImage(out.bytes, 'pw')).rejects.toThrow('数据已损坏');
+  });
+
+  it('多图合并：单张输出，解密还原全部原图（三种保护均可用）', async () => {
+    const images = [
+      { name: 'a.png', raster: randomRaster(20, 12) },
+      { name: 'b.png', raster: randomRaster(10, 30) },
+      { name: 'c.png', raster: randomRaster(16, 16) },
+    ];
+    const seed = randomKeySeed();
+    const params: ScrambleParams = {
+      ...base, pack: true, mode: 'scramble', protection: 'keyfile', password: '', blockSize: 8, noise: 8,
+    };
+    const out = await encryptPack(images, params, [], seed);
+    expect(out.outRaster.data).not.toEqual(images[0].raster.data); // 输出为单张噪声图
+    const restored = await decryptImage(out.bytes, undefined, seed);
+    expect(restored.length).toBe(3);
+    expect(restored.map((r) => r.name)).toEqual(['a.png', 'b.png', 'c.png']);
+    restored.forEach((r, i) => expect(r.raster.data).toEqual(images[i].raster.data));
+
+    // 无保护与口令保护同样支持合并
+    const noneOut = await encryptPack(images, { ...params, protection: 'none', password: '' });
+    expect((await decryptImage(noneOut.bytes)).length).toBe(3);
+    const pwOut = await encryptPack(images, { ...params, protection: 'password', password: 'p' });
+    expect((await decryptImage(pwOut.bytes, 'p')).map((r) => r.name)).toEqual(['a.png', 'b.png', 'c.png']);
+    await expect(decryptImage(pwOut.bytes, 'nope')).rejects.toThrow();
+  });
+
+  it('多图合并（覆盖合成）：遮盖图不参与还原', async () => {
+    const images = [
+      { name: 'x.png', raster: randomRaster(24, 24) },
+      { name: 'y.png', raster: randomRaster(24, 24) },
+    ];
+    const cover = opaqueRaster(24, 24);
+    const seed = randomKeySeed();
+    const params: OverlayParams = {
+      ...base, pack: true, mode: 'overlay', protection: 'keyfile', password: '', opacity: 1, fit: 'cover',
+    };
+    const out = await encryptPack(images, params, [cover], seed);
+    expect(out.outRaster.data).toEqual(cover.data); // 可见图=遮盖图
+    const restored = await decryptImage(out.bytes, undefined, seed);
+    expect(restored.length).toBe(2);
+    expect(restored.map((r) => r.name)).toEqual(['x.png', 'y.png']);
+    restored.forEach((r, i) => expect(r.raster.data).toEqual(images[i].raster.data));
   });
 });

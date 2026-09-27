@@ -35,6 +35,8 @@ const PROT_FROM: readonly Protection[] = ['none', 'password', 'keyfile'];
 /** 解密后可得的明文元数据 */
 export interface MetaFields {
   mode: Mode;
+  /** 多图合并标志（仅密钥文件保护下由本工具产生） */
+  pack: boolean;
   protection: Protection;
   /** scramble: blockSize / overlay: opacity% */
   p1: number;
@@ -99,7 +101,8 @@ export function buildMeta(f: MetaFields, payload: Uint8Array): Uint8Array {
   const dv = new DataView(out.buffer);
   out.set(META_MAGIC, 0);
   let o = META_MAGIC.length;
-  out[o++] = f.mode === 'scramble' ? 1 : 2;
+  // mode 低比特：0=scramble 1=overlay；bit1：pack
+  out[o++] = (f.mode === 'scramble' ? 0 : 1) | (f.pack ? 2 : 0);
   out[o++] = PROT_CODE[f.protection];
   out[o++] = f.p1 & 0xff;
   out[o++] = f.p2 & 0xff;
@@ -121,7 +124,9 @@ export function parseMeta(buf: Uint8Array): { fields: MetaFields; payload: Uint8
   if (!hasMetaMagic(buf) || buf.length < META_FIXED) throw new Error('元数据无效');
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   let o = META_MAGIC.length;
-  const mode: Mode = buf[o++] === 1 ? 'scramble' : 'overlay';
+  const modeCode = buf[o++];
+  const mode: Mode = (modeCode & 1) === 1 ? 'overlay' : 'scramble';
+  const pack = (modeCode & 2) !== 0;
   const protection = PROT_FROM[buf[o++]] ?? 'none';
   const p1 = buf[o++];
   const p2 = buf[o++];
@@ -130,7 +135,7 @@ export function parseMeta(buf: Uint8Array): { fields: MetaFields; payload: Uint8
   const payloadLen = dv.getUint32(o, true); o += 4;
   if (o + payloadLen > buf.length) throw new Error('元数据被截断');
   return {
-    fields: { mode, protection, p1, p2, origWidth, origHeight },
+    fields: { mode, pack, protection, p1, p2, origWidth, origHeight },
     payload: buf.slice(o, o + payloadLen),
   };
 }
