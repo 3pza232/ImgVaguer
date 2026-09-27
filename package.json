@@ -1,0 +1,48 @@
+{
+  "name": "imgvaguer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "vue-tsc --noEmit",
+    "dist:win": "vite build && electron-builder --win portable"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "typescript": "~5.6.3",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8",
+    "vue-tsc": "^2.2.0"
+  },
+  "build": {
+    "appId": "com.imgvaguer.app",
+    "productName": "ImgVaguer",
+    "files": [
+      "dist/**",
+      "electron/**",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "portable"
+      ]
+    },
+    "portable": {
+      "artifactName": "ImgVaguer-0.1.0-portable.exe"
+    }
+  }
+}

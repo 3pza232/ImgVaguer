@@ -1,0 +1,232 @@
+/** 轻量响应式会话状态 + localStorage 设置持久化（不引入 Pinia，保持低依赖） */
+import type { Mode, Protection, Raster } from '@/core/types';
+import { reactive, watch } from 'vue';
+
+export interface TargetItem {
+  name: string;
+  file: File;
+  raster: Raster;
+  url: string;
+}
+
+export interface ResultItem {
+  name: string;
+  bytes: Uint8Array | null;
+  url: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface SavedParams {
+  protection: Protection;
+  iterations: number;
+  blockSize: 8 | 16 | 32;
+  noise: number;
+  opacity: number;
+  fit: 'cover' | 'stretch';
+  coverQuality: number;
+  rounds: number;
+  globalPerm: boolean;
+  sbox: boolean;
+  rowshift: boolean;
+}
+
+export interface Settings {
+  /** 记住参数调节 */
+  rememberParams: boolean;
+  defaultPassword: string;
+  defaultCover: { name: string; dataUrl: string } | null;
+  /** 默认覆盖图大小上限（MB） */
+  defaultCoverMaxMB: number;
+  /** 覆盖图层数量上限 */
+  maxCoverLayers: number;
+  params: SavedParams;
+}
+
+const SETTINGS_KEY = 'imgvaguer.settings.v1';
+
+const defaultParams: SavedParams = {
+  protection: 'none',
+  iterations: 200000,
+  blockSize: 16,
+  noise: 16,
+  opacity: 1,
+  fit: 'cover',
+  coverQuality: 1,
+  rounds: 2,
+  globalPerm: true,
+  sbox: true,
+  rowshift: true,
+};
+
+function loadSettings(): Settings {
+  const fallback: Settings = {
+    rememberParams: true,
+    defaultPassword: '',
+    defaultCover: null,
+    defaultCoverMaxMB: 1.5,
+    maxCoverLayers: 4,
+    params: { ...defaultParams },
+  };
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return fallback;
+    const s = JSON.parse(raw) as Partial<Settings>;
+    return {
+      rememberParams: s.rememberParams ?? true,
+      defaultPassword: s.defaultPassword ?? '',
+      defaultCover: s.defaultCover ?? null,
+      defaultCoverMaxMB: s.defaultCoverMaxMB ?? 1.5,
+      maxCoverLayers: s.maxCoverLayers ?? 4,
+      params: { ...defaultParams, ...(s.params ?? {}) },
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+export const settings = reactive<Settings>(loadSettings());
+
+export const store = reactive({
+  /** 操作模式：加密 / 解密 */
+  op: 'encrypt' as 'encrypt' | 'decrypt',
+  mode: 'scramble' as Mode,
+  protection: 'none' as Protection,
+  password: '',
+  iterations: 200000,
+  blockSize: 16 as 8 | 16 | 32,
+  noise: 16,
+  opacity: 1,
+  fit: 'cover' as 'cover' | 'stretch',
+  /** 覆盖层细节压缩 0.1..1（1=不压缩） */
+  coverQuality: 1,
+  /** 强化参数：变换轮数 / S 盒 / 行列移位 / 全局像素置换 */
+  rounds: 2,
+  globalPerm: true,
+  sbox: true,
+  rowshift: true,
+
+  targets: [] as TargetItem[],
+  /** 覆盖图层，按下层→上层排列 */
+  covers: [] as TargetItem[],
+  /** 目标图所在层：位于其下方的覆盖图数量 */
+  targetLayer: 0,
+  /** 解密用密钥文件 */
+  keyFile: null as { name: string; seed: Uint8Array } | null,
+  /** 加密后待手动下载的密钥文件 */
+  pendingKeyFile: null as { name: string; text: string } | null,
+  results: [] as ResultItem[],
+  logs: [] as string[],
+  busy: false,
+});
+
+// 启动时应用持久化设置
+if (settings.rememberParams) {
+  const p = settings.params;
+  Object.assign(store, {
+    protection: p.protection,
+    iterations: p.iterations,
+    blockSize: p.blockSize,
+    noise: p.noise,
+    opacity: p.opacity,
+    fit: p.fit,
+    coverQuality: p.coverQuality,
+    rounds: p.rounds,
+    globalPerm: p.globalPerm,
+    sbox: p.sbox,
+    rowshift: p.rowshift,
+  });
+}
+if (settings.defaultPassword) {
+  store.password = settings.defaultPassword;
+  store.protection = 'password';
+}
+
+export function saveSettings(): void {
+  settings.params = {
+    protection: store.protection,
+    iterations: store.iterations,
+    blockSize: store.blockSize,
+    noise: store.noise,
+    opacity: store.opacity,
+    fit: store.fit,
+    coverQuality: store.coverQuality,
+    rounds: store.rounds,
+    globalPerm: store.globalPerm,
+    sbox: store.sbox,
+    rowshift: store.rowshift,
+  };
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    // 存储超限（如默认覆盖图过大）时静默失败，不影响使用
+  }
+}
+
+// 参数变更时自动持久化
+watch(
+  () => [
+    store.protection,
+    store.iterations,
+    store.blockSize,
+    store.noise,
+    store.opacity,
+    store.fit,
+    store.coverQuality,
+    store.rounds,
+    store.globalPerm,
+    store.sbox,
+    store.rowshift,
+  ],
+  () => {
+    if (settings.rememberParams) saveSettings();
+  },
+);
+
+export function log(msg: string): void {
+  const t = new Date().toTimeString().slice(0, 8);
+  store.logs.push(`[${t}] ${msg}`);
+  if (store.logs.length > 300) store.logs.splice(0, store.logs.length - 300);
+}
+
+export function removeTarget(index: number): void {
+  const t = store.targets[index];
+  if (!t) return;
+  URL.revokeObjectURL(t.url);
+  store.targets.splice(index, 1);
+  log(`移除 ${t.name}`);
+}
+
+export function clearTargets(): void {
+  for (const t of store.targets) URL.revokeObjectURL(t.url);
+  store.targets = [];
+  store.results = [];
+}
+
+export function removeCover(index: number): void {
+  const c = store.covers[index];
+  if (!c) return;
+  URL.revokeObjectURL(c.url);
+  store.covers.splice(index, 1);
+  if (store.targetLayer > store.covers.length) store.targetLayer = store.covers.length;
+  log(`移除混淆图 ${c.name}`);
+}
+
+export function moveCover(from: number, to: number): void {
+  if (from === to || from < 0 || to < 0 || from >= store.covers.length || to >= store.covers.length) return;
+  const [c] = store.covers.splice(from, 1);
+  store.covers.splice(to, 0, c);
+  log(`混淆图 ${c.name} 移至第 ${to + 1} 层`);
+}
+
+export function clearCovers(): void {
+  for (const c of store.covers) URL.revokeObjectURL(c.url);
+  store.covers = [];
+  store.targetLayer = 0;
+}
+
+export function clearKeyFile(): void {
+  if (!store.keyFile) return;
+  log(`卸载密钥文件 ${store.keyFile.name}`);
+  store.keyFile = null;
+}
