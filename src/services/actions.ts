@@ -2,7 +2,7 @@
 import { generateKeyFile, parseKeyFile, randomKeySeed } from '@/core/keyfile';
 import { encodePng } from '@/core/png';
 import type { ImgVaguerParams, Raster } from '@/core/types';
-import { log, saveSettings, settings, store, type ResultItem } from '@/stores/session';
+import { detail, log, saveSettings, settings, store, type KeyFileRef, type ResultItem } from '@/stores/session';
 import { zipSync } from 'fflate';
 import { decryptImage, encryptImage, readHeader } from './engine';
 import { degradeRaster, downloadBytes, fileToRaster, rasterToUrl, resizeRaster } from './image-io';
@@ -91,12 +91,17 @@ export async function runEncrypt(): Promise<void> {
   if (store.protection === 'password' && !store.password) return log('错误: 已选择口令保护但未输入口令');
 
   store.busy = true;
-  store.results = [];
-  store.pendingKeyFile = null;
   const params = buildParams();
-  // 密钥文件保护：整批共用一枚种子，完成后在结果区手动下载
+  // 密钥文件保护：整批共用一枚种子，随该批结果一同保存以便随时下载
   const extSeed = store.protection === 'keyfile' ? randomKeySeed() : undefined;
+  const keyFile: KeyFileRef | null = extSeed
+    ? { name: 'imgvaguer-key.ivkey', text: generateKeyFile(extSeed) }
+    : null;
+  store.batches.push({ items: [], keyFile });
+  store.batchIndex = store.batches.length - 1;
+  const batch = store.batches[store.batches.length - 1];
   let okCount = 0;
+  log(`开始加密 ${store.targets.length} 项 [${params.mode}/${store.protection}]`);
   try {
     for (const t of store.targets) {
       const t0 = performance.now();
@@ -110,9 +115,9 @@ export async function runEncrypt(): Promise<void> {
             ),
           );
         }
-        const out = await encryptImage(t.raster, params, coverRasters, extSeed);
+        const out = await encryptImage(t.raster, params, coverRasters, extSeed, detail);
         okCount++;
-        store.results.push({
+        batch.items.push({
           name: suffixed(t.name, '.imgvaguer.png'),
           bytes: out.bytes,
           url: rasterToUrl(out.outRaster),
@@ -120,12 +125,11 @@ export async function runEncrypt(): Promise<void> {
         });
         log(`加密 ${t.name} -> ${(out.bytes.length / 1024).toFixed(1)}KB (${(performance.now() - t0).toFixed(0)}ms)`);
       } catch (e) {
-        store.results.push({ name: t.name, bytes: null, url: '', ok: false, error: (e as Error).message });
+        batch.items.push({ name: t.name, bytes: null, url: '', ok: false, error: (e as Error).message });
         log(`失败 ${t.name}: ${(e as Error).message}`);
       }
     }
-    if (extSeed && okCount > 0) {
-      store.pendingKeyFile = { name: 'imgvaguer-key.ivkey', text: generateKeyFile(extSeed) };
+    if (keyFile && okCount > 0) {
       log('密钥文件已生成：请在结果区下载并分开保管，丢失即无法还原');
     }
   } finally {
@@ -133,9 +137,9 @@ export async function runEncrypt(): Promise<void> {
   }
 }
 
-/** 手动下载本批密钥文件 */
+/** 下载当前批次携带的密钥文件 */
 export function downloadKeyFile(): void {
-  const k = store.pendingKeyFile;
+  const k = store.batches[store.batchIndex]?.keyFile;
   if (!k) return;
   downloadBytes(new TextEncoder().encode(k.text), k.name, 'application/octet-stream');
   log(`密钥文件已下载: ${k.name}`);
@@ -146,30 +150,28 @@ export async function runDecrypt(): Promise<void> {
   if (!store.targets.length) return log('错误: 未选择待还原图像');
 
   store.busy = true;
-  store.results = [];
-  store.pendingKeyFile = null;
+  store.batches.push({ items: [], keyFile: null });
+  store.batchIndex = store.batches.length - 1;
+  const batch = store.batches[store.batches.length - 1];
+  log(`开始解密 ${store.targets.length} 项`);
   try {
     for (const t of store.targets) {
       const t0 = performance.now();
       try {
         const bytes = new Uint8Array(await t.file.arrayBuffer());
-        const header = readHeader(bytes);
-        if (!header) throw new Error('非 ImgVaguer 图像');
-        if (header.protection === 'password' && !store.password) throw new Error('该图像需要口令');
-        if (header.protection === 'keyfile' && !store.keyFile) throw new Error('该图像需要密钥文件');
-        // scramble 需要像素数据；overlay 直接从 chunk 还原
-        const raster = header.mode === 'scramble' ? t.raster : null;
-        const restored = await decryptImage(bytes, raster, store.password || undefined, store.keyFile?.seed);
+        if (!readHeader(bytes)) throw new Error('非 ImgVaguer 图像');
+        // 像素由引擎从 PNG 内部无损解出；保护方式由尝试凭据自动判定
+        const restored = await decryptImage(bytes, store.password || undefined, store.keyFile?.seed, detail);
         const out = encodePng(restored);
-        store.results.push({
+        batch.items.push({
           name: suffixed(t.name, '.restored.png'),
           bytes: out,
           url: rasterToUrl(restored),
           ok: true,
         });
-        log(`还原 ${t.name} [${header.mode}/${header.protection}] (${(performance.now() - t0).toFixed(0)}ms)`);
+        log(`还原 ${t.name} (${(performance.now() - t0).toFixed(0)}ms)`);
       } catch (e) {
-        store.results.push({ name: t.name, bytes: null, url: '', ok: false, error: (e as Error).message });
+        batch.items.push({ name: t.name, bytes: null, url: '', ok: false, error: (e as Error).message });
         log(`失败 ${t.name}: ${(e as Error).message}`);
       }
     }
@@ -234,14 +236,27 @@ export function downloadOne(r: ResultItem): void {
   if (r.bytes) downloadBytes(r.bytes, r.name);
 }
 
+/** 在 zip 中为重复文件名追加 -2/-3 后缀，避免互相覆盖 */
+function uniqueName(entries: Record<string, Uint8Array>, name: string): string {
+  if (!(name in entries)) return name;
+  const dot = name.lastIndexOf('.');
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  let i = 2;
+  while (`${base}-${i}${ext}` in entries) i++;
+  return `${base}-${i}${ext}`;
+}
+
+/** 下载当前批次的全部结果，并随附该批密钥文件 */
 export function downloadAll(): void {
+  const batch = store.batches[store.batchIndex];
+  if (!batch) return;
   const entries: Record<string, Uint8Array> = {};
-  for (const r of store.results) {
-    if (r.ok && r.bytes) entries[r.name] = r.bytes;
+  for (const r of batch.items) {
+    if (r.ok && r.bytes) entries[uniqueName(entries, r.name)] = r.bytes;
   }
-  // 密钥文件随结果一并下发
-  if (store.pendingKeyFile) {
-    entries[store.pendingKeyFile.name] = new TextEncoder().encode(store.pendingKeyFile.text);
+  if (batch.keyFile) {
+    entries[uniqueName(entries, batch.keyFile.name)] = new TextEncoder().encode(batch.keyFile.text);
   }
   const names = Object.keys(entries);
   if (!names.length) return;

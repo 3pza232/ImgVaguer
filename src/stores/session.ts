@@ -9,12 +9,32 @@ export interface TargetItem {
   url: string;
 }
 
+/** 一次加密批次共用的密钥文件（供结果随时下载） */
+export interface KeyFileRef {
+  name: string;
+  text: string;
+}
+
 export interface ResultItem {
   name: string;
   bytes: Uint8Array | null;
   url: string;
   ok: boolean;
   error?: string;
+}
+
+/** 单次执行产生的整批结果（含该批密钥文件） */
+export interface ResultBatch {
+  items: ResultItem[];
+  keyFile: KeyFileRef | null;
+}
+
+export type LogLevel = 'info' | 'detail';
+
+export interface LogLine {
+  time: string;
+  level: LogLevel;
+  text: string;
 }
 
 export interface SavedParams {
@@ -46,7 +66,7 @@ export interface Settings {
 const SETTINGS_KEY = 'imgvaguer.settings.v1';
 
 const defaultParams: SavedParams = {
-  protection: 'none',
+  protection: 'password',
   iterations: 200000,
   blockSize: 16,
   noise: 16,
@@ -91,7 +111,7 @@ export const store = reactive({
   /** 操作模式：加密 / 解密 */
   op: 'encrypt' as 'encrypt' | 'decrypt',
   mode: 'scramble' as Mode,
-  protection: 'none' as Protection,
+  protection: 'password' as Protection,
   password: '',
   iterations: 200000,
   blockSize: 16 as 8 | 16 | 32,
@@ -113,10 +133,13 @@ export const store = reactive({
   targetLayer: 0,
   /** 解密用密钥文件 */
   keyFile: null as { name: string; seed: Uint8Array } | null,
-  /** 加密后待手动下载的密钥文件 */
-  pendingKeyFile: null as { name: string; text: string } | null,
-  results: [] as ResultItem[],
-  logs: [] as string[],
+  /** 本次进程累计的结果批次，关闭程序即清空 */
+  batches: [] as ResultBatch[],
+  /** 结果面板当前展示的批次序号 */
+  batchIndex: 0,
+  logs: [] as LogLine[],
+  /** 终端视图：精简 / 详情 */
+  logView: 'brief' as 'brief' | 'detail',
   busy: false,
 });
 
@@ -183,10 +206,40 @@ watch(
   },
 );
 
+function pushLog(level: LogLevel, text: string): void {
+  store.logs.push({ time: new Date().toTimeString().slice(0, 8), level, text });
+  if (store.logs.length > 600) store.logs.splice(0, store.logs.length - 600);
+}
+
+/** 精简日志：为用户保留的关键节点 */
 export function log(msg: string): void {
-  const t = new Date().toTimeString().slice(0, 8);
-  store.logs.push(`[${t}] ${msg}`);
-  if (store.logs.length > 300) store.logs.splice(0, store.logs.length - 300);
+  pushLog('info', msg);
+}
+
+/** 详情日志：加密/解密内部的步骤、参数与方法，仅"详情"视图展示 */
+export function detail(msg: string): void {
+  pushLog('detail', msg);
+}
+
+export function clearLogs(): void {
+  store.logs = [];
+}
+
+/** 切换结果面板展示的批次，step=±1，越界回绕 */
+export function stepBatch(step: number): void {
+  const n = store.batches.length;
+  if (n === 0) return;
+  store.batchIndex = (store.batchIndex + step + n) % n;
+}
+
+export function removeBatch(index: number): void {
+  const b = store.batches[index];
+  if (!b) return;
+  for (const r of b.items) if (r.url) URL.revokeObjectURL(r.url);
+  store.batches.splice(index, 1);
+  if (store.batchIndex >= store.batches.length) {
+    store.batchIndex = Math.max(0, store.batches.length - 1);
+  }
 }
 
 export function removeTarget(index: number): void {
@@ -200,7 +253,6 @@ export function removeTarget(index: number): void {
 export function clearTargets(): void {
   for (const t of store.targets) URL.revokeObjectURL(t.url);
   store.targets = [];
-  store.results = [];
 }
 
 export function removeCover(index: number): void {

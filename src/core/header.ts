@@ -1,84 +1,136 @@
 /**
- * ImgVaguer 数据块（ivGr chunk）头部布局，定长 75B + HMAC 32B + payload：
- *   0  magic "IVGR"        4
- *   4  version             1
- *   5  mode (1=scramble 2=overlay) 1
- *   6  flags (bit0=口令)   1
- *   7  kdf iterations      4 LE
- *  11  p1 (blockSize / opacity%) 1
- *  12  p2 (noise / fit)    1
- *  13  reserved            2
- *  15  salt               16
- *  31  seed (无口令时)     32
- *  63  origWidth           4 LE
- *  67  origHeight          4 LE
- *  71  payloadLen          4 LE
- *  75  HMAC-SHA256        32  (覆盖 header||payload)
+ * ImgVaguer 数据块（私有 ancillary chunk）wire 格式。
+ *
+ * 公开前导（可被任何人读取，用于引导密钥派生）：
+ *   version(1) | salt(16) | iterations(4 LE) | seed(32)
+ * 之后是加密元数据与 HMAC：
+ *   metaCipher(变长) | mac(32)
+ *
+ * 除前导外**不暴露任何品牌标识或明文参数**：模式、保护方式、分块/噪声、
+ * 原图尺寸、参数载荷全部在 metaCipher 内（用 'meta' 子密钥加密）。
+ * 是否为本工具产物由 chunk 类型判定；解密内容由内部魔数（META_MAGIC）校验。
+ *
+ * seed 恒为 32B 随机：none 模式下即主密钥材料，其余模式下为等长诱饵，
+ * 使三种保护方式在公开字段上不可区分。
  */
 import type { Mode, Protection } from './types';
 
-const PROT_CODE: Record<Protection, number> = { none: 0, password: 1, keyfile: 2 };
-
-function protectionFrom(code: number): Protection {
-  return code === 1 ? 'password' : code === 2 ? 'keyfile' : 'none';
-}
-
-export const CHUNK_TYPE = 'ivGr';
-export const VERSION = 1;
-export const HEADER_LEN = 75;
+/** 私有 ancillary chunk 类型（去品牌化命名，仍符合 PNG 命名规范） */
+export const CHUNK_TYPE = 'inVa';
+export const VERSION = 3;
 export const HMAC_LEN = 32;
 
-const MAGIC = [0x49, 0x56, 0x47, 0x52]; // "IVGR"
+export const SALT_LEN = 16;
+export const SEED_LEN = 32;
+/** version(1) + salt(16) + iterations(4) + seed(32) */
+export const PREAMBLE_LEN = 1 + SALT_LEN + 4 + SEED_LEN;
 
-export interface HeaderFields {
+const META_MAGIC = Uint8Array.from([0x49, 0x56, 0x47, 0x4d, 0x45, 0x54, 0x41, 0x33]); // "IVGMETA3"
+/** magic(8) + mode(1) + protection(1) + p1(1) + p2(1) + w(4) + h(4) + payloadLen(4) */
+const META_FIXED = META_MAGIC.length + 1 + 1 + 1 + 1 + 4 + 4 + 4;
+
+const PROT_CODE: Record<Protection, number> = { none: 0, password: 1, keyfile: 2 };
+const PROT_FROM: readonly Protection[] = ['none', 'password', 'keyfile'];
+
+/** 解密后可得的明文元数据 */
+export interface MetaFields {
   mode: Mode;
   protection: Protection;
-  iterations: number;
+  /** scramble: blockSize / overlay: opacity% */
   p1: number;
+  /** scramble: noise / overlay: fit */
   p2: number;
-  salt: Uint8Array;
-  seed: Uint8Array;
   origWidth: number;
   origHeight: number;
-  payloadLen: number;
 }
 
-export function buildHeader(f: HeaderFields): Uint8Array {
-  if (f.salt.length !== 16 || f.seed.length !== 32) throw new Error('salt/seed 长度非法');
-  const out = new Uint8Array(HEADER_LEN);
+export interface ParsedChunk {
+  version: number;
+  salt: Uint8Array;
+  iterations: number;
+  seed: Uint8Array;
+  metaCipher: Uint8Array;
+  mac: Uint8Array;
+  /** version||salt||iterations||seed，参与 HMAC，不含 metaCipher 与 mac */
+  preamble: Uint8Array;
+}
+
+export function buildPreamble(
+  version: number,
+  salt: Uint8Array,
+  iterations: number,
+  seed: Uint8Array,
+): Uint8Array {
+  if (salt.length !== SALT_LEN || seed.length !== SEED_LEN) throw new Error('salt/seed 长度非法');
+  const out = new Uint8Array(PREAMBLE_LEN);
   const dv = new DataView(out.buffer);
-  out.set(MAGIC, 0);
-  out[4] = VERSION;
-  out[5] = f.mode === 'scramble' ? 1 : 2;
-  out[6] = PROT_CODE[f.protection];
-  dv.setUint32(7, f.iterations, true);
-  out[11] = f.p1 & 0xff;
-  out[12] = f.p2 & 0xff;
-  out.set(f.salt, 15);
-  out.set(f.seed, 31);
-  dv.setUint32(63, f.origWidth, true);
-  dv.setUint32(67, f.origHeight, true);
-  dv.setUint32(71, f.payloadLen, true);
+  out[0] = version;
+  out.set(salt, 1);
+  dv.setUint32(1 + SALT_LEN, iterations >>> 0, true);
+  out.set(seed, 1 + SALT_LEN + 4);
   return out;
 }
 
-export function parseHeader(buf: Uint8Array): HeaderFields {
-  if (buf.length < HEADER_LEN) throw new Error('数据块长度不足');
-  for (let i = 0; i < 4; i++) if (buf[i] !== MAGIC[i]) throw new Error('非法的 ImgVaguer 数据块');
-  if (buf[4] !== VERSION) throw new Error(`不支持的版本: ${buf[4]}`);
+export function buildChunk(preamble: Uint8Array, metaCipher: Uint8Array, mac: Uint8Array): Uint8Array {
+  const out = new Uint8Array(preamble.length + metaCipher.length + mac.length);
+  out.set(preamble, 0);
+  out.set(metaCipher, preamble.length);
+  out.set(mac, preamble.length + metaCipher.length);
+  return out;
+}
+
+export function parseChunk(buf: Uint8Array): ParsedChunk {
+  if (buf.length < PREAMBLE_LEN + HMAC_LEN) throw new Error('数据块被截断');
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  const mode = buf[5] === 1 ? 'scramble' : buf[5] === 2 ? 'overlay' : null;
-  if (!mode) throw new Error('未知模式');
   return {
-    mode,
-    protection: protectionFrom(buf[6] & 3),
-    iterations: dv.getUint32(7, true),
-    p1: buf[11],
-    p2: buf[12],
-    salt: buf.slice(15, 31),
-    seed: buf.slice(31, 63),
-    origWidth: dv.getUint32(63, true),
-    origHeight: dv.getUint32(67, true),
-    payloadLen: dv.getUint32(71, true),
+    version: buf[0],
+    salt: buf.slice(1, 1 + SALT_LEN),
+    iterations: dv.getUint32(1 + SALT_LEN, true),
+    seed: buf.slice(1 + SALT_LEN + 4, PREAMBLE_LEN),
+    metaCipher: buf.subarray(PREAMBLE_LEN, buf.length - HMAC_LEN),
+    mac: buf.subarray(buf.length - HMAC_LEN),
+    preamble: buf.subarray(0, PREAMBLE_LEN),
+  };
+}
+
+/** 序列化明文元数据（供加密前使用），payload 追加在其后 */
+export function buildMeta(f: MetaFields, payload: Uint8Array): Uint8Array {
+  const out = new Uint8Array(META_FIXED + payload.length);
+  const dv = new DataView(out.buffer);
+  out.set(META_MAGIC, 0);
+  let o = META_MAGIC.length;
+  out[o++] = f.mode === 'scramble' ? 1 : 2;
+  out[o++] = PROT_CODE[f.protection];
+  out[o++] = f.p1 & 0xff;
+  out[o++] = f.p2 & 0xff;
+  dv.setUint32(o, f.origWidth, true); o += 4;
+  dv.setUint32(o, f.origHeight, true); o += 4;
+  dv.setUint32(o, payload.length, true); o += 4;
+  out.set(payload, o);
+  return out;
+}
+
+/** 轻量校验：仅判断内部魔数，用于候选密钥筛选 */
+export function hasMetaMagic(buf: Uint8Array): boolean {
+  if (buf.length < META_MAGIC.length) return false;
+  for (let i = 0; i < META_MAGIC.length; i++) if (buf[i] !== META_MAGIC[i]) return false;
+  return true;
+}
+
+export function parseMeta(buf: Uint8Array): { fields: MetaFields; payload: Uint8Array } {
+  if (!hasMetaMagic(buf) || buf.length < META_FIXED) throw new Error('元数据无效');
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let o = META_MAGIC.length;
+  const mode: Mode = buf[o++] === 1 ? 'scramble' : 'overlay';
+  const protection = PROT_FROM[buf[o++]] ?? 'none';
+  const p1 = buf[o++];
+  const p2 = buf[o++];
+  const origWidth = dv.getUint32(o, true); o += 4;
+  const origHeight = dv.getUint32(o, true); o += 4;
+  const payloadLen = dv.getUint32(o, true); o += 4;
+  if (o + payloadLen > buf.length) throw new Error('元数据被截断');
+  return {
+    fields: { mode, protection, p1, p2, origWidth, origHeight },
+    payload: buf.slice(o, o + payloadLen),
   };
 }

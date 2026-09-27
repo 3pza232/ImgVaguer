@@ -42,6 +42,21 @@ export function chacha20Stream(key: Uint8Array, nonce: Uint8Array, length: numbe
   return chacha20StreamAt(key, nonce, 0, length);
 }
 
+/** 逐图 IV 长度（12B nonce 中除域字节外的部分） */
+export const IV_LEN = 11;
+
+/**
+ * 以域字节 + 逐图 IV 组装 12B nonce。
+ * 同一 IV 下不同域互不重复；不同 IV 下同域亦不重复，
+ * 保证「同密钥 + 不同图像」绝不共享密钥流。
+ */
+export function ivNonce(iv: Uint8Array, domain: number): Uint8Array {
+  const n = new Uint8Array(12);
+  n[0] = domain;
+  n.set(iv.subarray(0, IV_LEN), 1);
+  return n;
+}
+
 /** 从流中任意字节偏移处取 length 字节，支持分块处理大图 */
 export function chacha20StreamAt(
   key: Uint8Array,

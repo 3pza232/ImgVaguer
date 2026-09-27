@@ -1,7 +1,9 @@
 {
   "name": "imgvaguer",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "description": "图片加密混淆与还原工具（密文混淆 / 覆盖合成，口令 / 密钥文件保护）",
+  "author": "pza",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -42,7 +44,7 @@
       ]
     },
     "portable": {
-      "artifactName": "ImgVaguer-0.1.0-portable.exe"
+      "artifactName": "ImgVaguer-0.2.0-portable.exe"
     }
   }
 }

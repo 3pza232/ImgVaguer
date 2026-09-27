@@ -2,18 +2,25 @@
  * 密文混淆：全可逆像素级变换管线。
  * 正向：通道置换 → 异或流 → 加性噪声 → 块内像素置换+双面体变换 → 块间置换
  * 逆向：严格镜像执行。所有随机性来自 ChaCha20 密钥流，双射保证逐位还原。
+ *
+ * 每个子步骤/每一轮使用独立 nonce 域；域字节之外填入逐图随机 IV，
+ * 保证不同图像（即使同一密钥）绝不共享密钥流。
  */
-import { chacha20Block, chacha20StreamAt } from './chacha';
+import { chacha20Block, chacha20StreamAt, ivNonce } from './chacha';
 import type { SubKeys } from './kdf';
 import type { Raster } from './types';
 
 export type BlockSize = 8 | 16 | 32;
 
-function nonce(domain: number): Uint8Array {
-  const n = new Uint8Array(12);
-  n[0] = domain;
-  return n;
-}
+/** 单轮各子步骤使用的 nonce 域（互不重叠，并随轮次整体偏移） */
+const DOM_CHANNEL = 1;
+const DOM_INTRA = 2;
+const DOM_BLOCK = 3;
+const DOM_XOR = 4;
+const DOM_NOISE = 5;
+const DOM_GLOBAL_PERM = 6;
+const DOM_SBOX = 7;
+const DOM_ROW_SHIFT = 8;
 
 /** 基于密钥流的均匀抽样 reader，支持拒绝采样消除模偏 */
 class KeyedReader {
@@ -314,6 +321,7 @@ function roundTransform(
   keys: SubKeys,
   b: BlockSize,
   amp: number,
+  iv: Uint8Array,
   inverse: boolean,
   round: number,
   opts: { sbox: boolean; rowshift: boolean },
@@ -321,33 +329,33 @@ function roundTransform(
   const data = src.data.slice();
   const rects = blockRects(src.width, src.height, b);
   const dom = round * 16;
-  const rdChannel = new KeyedReader(keys.perm, nonce(1 + dom));
-  const rdIntra = new KeyedReader(keys.perm, nonce(2 + dom));
-  const rdBlock = new KeyedReader(keys.perm, nonce(3 + dom));
+  const rdChannel = new KeyedReader(keys.perm, ivNonce(iv, DOM_CHANNEL + dom));
+  const rdIntra = new KeyedReader(keys.perm, ivNonce(iv, DOM_INTRA + dom));
+  const rdBlock = new KeyedReader(keys.perm, ivNonce(iv, DOM_BLOCK + dom));
   if (!inverse) {
     channelPass(data, src.width, rects, rdChannel, false);
-    xorPass(data, src.width, src.height, keys.xor, nonce(4 + dom));
-    if (opts.sbox) sboxPass(data, keys.xor, false, nonce(7 + dom));
-    noisePass(data, src.width, src.height, keys.noise, amp, false, nonce(5 + dom));
-    if (opts.rowshift) rowShiftPass(data, src.width, src.height, keys.perm, false, nonce(8 + dom));
+    xorPass(data, src.width, src.height, keys.xor, ivNonce(iv, DOM_XOR + dom));
+    if (opts.sbox) sboxPass(data, keys.xor, false, ivNonce(iv, DOM_SBOX + dom));
+    noisePass(data, src.width, src.height, keys.noise, amp, false, ivNonce(iv, DOM_NOISE + dom));
+    if (opts.rowshift) rowShiftPass(data, src.width, src.height, keys.perm, false, ivNonce(iv, DOM_ROW_SHIFT + dom));
     intraPass(data, src.width, rects, b, rdIntra, false);
     blockPermPass(data, src.width, rects, rdBlock, false);
   } else {
     blockPermPass(data, src.width, rects, rdBlock, true);
     intraPass(data, src.width, rects, b, rdIntra, true);
-    if (opts.rowshift) rowShiftPass(data, src.width, src.height, keys.perm, true, nonce(8 + dom));
-    noisePass(data, src.width, src.height, keys.noise, amp, true, nonce(5 + dom));
-    if (opts.sbox) sboxPass(data, keys.xor, true, nonce(7 + dom));
-    xorPass(data, src.width, src.height, keys.xor, nonce(4 + dom));
+    if (opts.rowshift) rowShiftPass(data, src.width, src.height, keys.perm, true, ivNonce(iv, DOM_ROW_SHIFT + dom));
+    noisePass(data, src.width, src.height, keys.noise, amp, true, ivNonce(iv, DOM_NOISE + dom));
+    if (opts.sbox) sboxPass(data, keys.xor, true, ivNonce(iv, DOM_SBOX + dom));
+    xorPass(data, src.width, src.height, keys.xor, ivNonce(iv, DOM_XOR + dom));
     channelPass(data, src.width, rects, rdChannel, true);
   }
   return { width: src.width, height: src.height, data };
 }
 
 /** 全局像素置换：整图 keyed Fisher-Yates，消除一切局部统计特征（专业模式） */
-function globalPermPass(src: Raster, keys: SubKeys, inverse: boolean): Raster {
+function globalPermPass(src: Raster, keys: SubKeys, iv: Uint8Array, inverse: boolean): Raster {
   const data = src.data.slice();
-  const rd = new KeyedReader(keys.perm, nonce(6));
+  const rd = new KeyedReader(keys.perm, ivNonce(iv, DOM_GLOBAL_PERM));
   const g = shuffleGather(src.width * src.height, rd);
   applyGather(data, g, inverse);
   return { width: src.width, height: src.height, data };
@@ -366,20 +374,34 @@ export interface ScrambleOptions {
 
 const MAX_ROUNDS = 8;
 
-export function scrambleImage(src: Raster, keys: SubKeys, blockSize: BlockSize, noiseAmp: number, opts: ScrambleOptions = {}): Raster {
+export function scrambleImage(
+  src: Raster,
+  keys: SubKeys,
+  blockSize: BlockSize,
+  noiseAmp: number,
+  iv: Uint8Array,
+  opts: ScrambleOptions = {},
+): Raster {
   const rounds = Math.min(Math.max(opts.rounds ?? 1, 1), MAX_ROUNDS);
   const flags = { sbox: !!opts.sbox, rowshift: !!opts.rowshift };
   let cur = src;
-  for (let r = 0; r < rounds; r++) cur = roundTransform(cur, keys, blockSize, noiseAmp, false, r, flags);
-  if (opts.globalPerm) cur = globalPermPass(cur, keys, false);
+  for (let r = 0; r < rounds; r++) cur = roundTransform(cur, keys, blockSize, noiseAmp, iv, false, r, flags);
+  if (opts.globalPerm) cur = globalPermPass(cur, keys, iv, false);
   return cur;
 }
 
-export function unscrambleImage(src: Raster, keys: SubKeys, blockSize: BlockSize, noiseAmp: number, opts: ScrambleOptions = {}): Raster {
+export function unscrambleImage(
+  src: Raster,
+  keys: SubKeys,
+  blockSize: BlockSize,
+  noiseAmp: number,
+  iv: Uint8Array,
+  opts: ScrambleOptions = {},
+): Raster {
   const rounds = Math.min(Math.max(opts.rounds ?? 1, 1), MAX_ROUNDS);
   const flags = { sbox: !!opts.sbox, rowshift: !!opts.rowshift };
   let cur = src;
-  if (opts.globalPerm) cur = globalPermPass(cur, keys, true);
-  for (let r = rounds - 1; r >= 0; r--) cur = roundTransform(cur, keys, blockSize, noiseAmp, true, r, flags);
+  if (opts.globalPerm) cur = globalPermPass(cur, keys, iv, true);
+  for (let r = rounds - 1; r >= 0; r--) cur = roundTransform(cur, keys, blockSize, noiseAmp, iv, true, r, flags);
   return cur;
 }
