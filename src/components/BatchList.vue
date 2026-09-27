@@ -5,6 +5,9 @@ import { computed } from 'vue';
 
 const batch = computed(() => store.batches[store.batchIndex] ?? null);
 const okCount = computed(() => batch.value?.items.filter((r) => r.ok).length ?? 0);
+
+/** 字节数 → KB 文本 */
+const kb = (bytes: number): string => `${(bytes / 1024).toFixed(1)}KB`;
 </script>
 
 <template>
@@ -22,11 +25,13 @@ const okCount = computed(() => batch.value?.items.filter((r) => r.ok).length ?? 
       <div v-if="batch.keyFile" class="item key-item">
         <span class="ok">⚿</span>
         <span class="name" :title="batch.keyFile.name">{{ batch.keyFile.name }}（本批加密密钥）</span>
+        <span class="fsize">{{ kb(batch.keyFile.text.length) }}</span>
         <button class="link" @click="downloadKeyFile">下载</button>
       </div>
       <div v-for="(r, i) in batch.items" :key="i" class="item">
         <span :class="r.ok ? 'ok' : 'bad'">{{ r.ok ? '✓' : '✗' }}</span>
         <span class="name" :title="r.error">{{ r.name }}<template v-if="r.error"> — {{ r.error }}</template></span>
+        <span v-if="r.bytes" class="fsize">{{ kb(r.bytes.length) }}</span>
         <button v-if="r.ok" class="link" @click="downloadOne(r)">下载</button>
       </div>
     </div>
