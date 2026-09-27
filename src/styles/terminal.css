@@ -482,7 +482,7 @@ input[type="range"]::-moz-range-thumb {
 
 /* ── 结果分页 ── */
 /* 结果列表（按批次） */
-.results { max-height: 140px; overflow-y: auto; scrollbar-gutter: stable; }
+.results { max-height: 140px; overflow-y: auto; scrollbar-gutter: stable; padding-right: 6px; }
 .results .item { display: flex; align-items: center; gap: 10px; padding: 2px 0; }
 .results .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .results .fsize { flex: none; color: var(--dim); font-size: 12px; }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { clearDefaultCover, setDefaultCover } from '@/services/actions';
-import { saveSettings, settings, store } from '@/stores/session';
+import { saveSettings, settings } from '@/stores/session';
 import { ref } from 'vue';
 
 const emit = defineEmits<{ (e: 'close'): void; (e: 'docs'): void }>();
@@ -15,10 +15,6 @@ function onCoverPick(e: Event): void {
 }
 
 function onPasswordSave(): void {
-  if (settings.defaultPassword) {
-    store.password = settings.defaultPassword;
-    store.protection = 'password';
-  }
   saveSettings();
 }
 
@@ -58,7 +54,7 @@ function adjustMaxLayers(d: number): void {
         <input
           v-model="settings.defaultPassword"
           type="password"
-          placeholder="留空则不设置，启动时自动填入"
+          placeholder="留空则不设置；口令模式下输入框为空时自动填入"
           autocomplete="off"
           @change="onPasswordSave"
         />

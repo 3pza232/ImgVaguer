@@ -143,7 +143,7 @@ export const store = reactive({
   busy: false,
 });
 
-// 启动时应用持久化设置
+// 启动时应用持久化设置（保护方式随参数一并记忆；仅首次使用默认口令方式）
 if (settings.rememberParams) {
   const p = settings.params;
   Object.assign(store, {
@@ -160,10 +160,17 @@ if (settings.rememberParams) {
     rowshift: p.rowshift,
   });
 }
-if (settings.defaultPassword) {
-  store.password = settings.defaultPassword;
-  store.protection = 'password';
+
+/** 口令模式下输入框为空时，自动填入设置中的默认口令（不改变保护方式） */
+export function applyDefaultPassword(): void {
+  if (store.protection === 'password' && !store.password && settings.defaultPassword) {
+    store.password = settings.defaultPassword;
+  }
 }
+
+// 手动切换到口令、或修改默认口令时，按需补全输入框
+watch([() => store.protection, () => settings.defaultPassword], () => applyDefaultPassword());
+applyDefaultPassword();
 
 export function saveSettings(): void {
   settings.params = {
