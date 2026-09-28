@@ -1,0 +1,26 @@
+{
+	"pages": [
+		{
+			"path": "pages/index/index",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "ImgVaguer"
+			}
+		},
+		{
+			"path": "pages/settings/settings",
+			"style": {
+				"navigationStyle": "custom",
+				"navigationBarTitleText": "设置"
+			}
+		}
+	],
+	"globalStyle": {
+		"navigationBarTextStyle": "white",
+		"navigationBarTitleText": "ImgVaguer",
+		"navigationBarBackgroundColor": "#0b0e0b",
+		"backgroundColor": "#0b0e0b",
+		"backgroundTextStyle": "dark"
+	},
+	"uniIdRouter": {}
+}

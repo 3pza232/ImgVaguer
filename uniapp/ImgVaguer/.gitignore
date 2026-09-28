@@ -1,0 +1,32 @@
+# HBuilderX 工程：源码全部保留，仅忽略构建产物与本机配置
+
+# 构建产物（H5 / App / 小程序均输出到此处）
+unpackage/
+dist/
+
+# 依赖（本工程零 npm 运行时依赖，仅在使用 npm 管理时出现）
+node_modules/
+
+# 编辑器 / IDE 本机配置
+.hbuilderx/
+.idea/
+.vscode/
+*.iml
+
+# 微信开发者工具的本地私有配置（含本机路径等信息）
+project.private.config.json
+
+# 签名与密钥：绝不入库
+*.jks
+*.keystore
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 日志与临时产物（校验脚手架、临时脚本）
+*.log
+*.local
+.tmp-*/
+*.tmp.*

@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2019",
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "strict": false,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowJs": true,
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"]
+    },
+    "lib": ["ES2019", "DOM"],
+    "types": []
+  },
+  "include": ["**/*.ts", "**/*.d.ts", "**/*.vue", "**/*.js"],
+  "exclude": ["node_modules", "unpackage"]
+}

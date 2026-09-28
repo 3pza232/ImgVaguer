@@ -12,6 +12,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "vue-tsc --noEmit",
+    "check:uniapp": "node scripts/check-uniapp.mjs",
     "dist:win": "vite build && electron-builder --win portable"
   },
   "dependencies": {

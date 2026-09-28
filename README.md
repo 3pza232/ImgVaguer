@@ -51,6 +51,9 @@ npm test
 # 类型检查
 npm run typecheck
 
+# uniapp 工程静态校验（按 h5 / mp-weixin / app-plus 裁剪条件编译后全量类型检查）
+npm run check:uniapp
+
 # Web 生产构建（输出 dist/）
 npm run build
 
@@ -71,6 +74,15 @@ npm run dist:win
 - 默认保护方式为**口令**；「无（种子内嵌）」持图即可还原，仅适用于防君子场景。
 - 「默认口令」以明文存于 localStorage，公共设备请勿使用。
 
+## 移动端（uni-app）
+
+仓库内含移动端姊妹实现 `uniapp/ImgVaguer/`（H5 / Android App / 微信小程序，HBuilderX 工程、零 npm 依赖），
+核心算法与桌面版同源，交互按触屏重设计：
+
+- 设计与落地记录：`uniapp/ImgVaguer/DESIGN.md`
+- 静态校验：`npm run check:uniapp`（按 h5 / mp-weixin / app-plus 裁剪条件编译后全量类型检查 `.ts` 与 `.vue`）
+- 组件级回归：随 `npm test` 运行（编译 SFC 后在 Node 中真实执行 `setup`）
+
 ## 项目结构
 
 ```
@@ -81,7 +93,9 @@ src/
 ├─ components/  # TUI 组件（拖放区、参数面板、堆叠预览、设置/文档面板等）
 └─ styles/      # 复古 TUI 主题
 electron/       # Electron 壳（便携 exe 打包）
-tests/          # Vitest 核心算法单测
+scripts/        # 开发脚本（uniapp 三平台静态校验）
+tests/          # Vitest 单测（核心算法往返 + uniapp 组件回归）
+uniapp/ImgVaguer/  # 移动端姊妹实现（H5 / App / 小程序）
 ```
 
 ---
