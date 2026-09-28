@@ -17,7 +17,8 @@ import type { Mode, Protection } from './types';
 
 /** 私有 ancillary chunk 类型（去品牌化命名，仍符合 PNG 命名规范） */
 export const CHUNK_TYPE = 'inVa';
-export const VERSION = 3;
+/** 线格式版本：仅本版本可读（不保留历史格式兼容） */
+export const VERSION = 5;
 export const HMAC_LEN = 32;
 
 export const SALT_LEN = 16;
@@ -26,8 +27,23 @@ export const SEED_LEN = 32;
 export const PREAMBLE_LEN = 1 + SALT_LEN + 4 + SEED_LEN;
 
 const META_MAGIC = Uint8Array.from([0x49, 0x56, 0x47, 0x4d, 0x45, 0x54, 0x41, 0x33]); // "IVGMETA3"
-/** magic(8) + mode(1) + protection(1) + p1(1) + p2(1) + w(4) + h(4) + payloadLen(4) */
+/** magic(8) + flags(1) + protection(1) + p1(1) + p2(1) + w(4) + h(4) + payloadLen(4) */
 const META_FIXED = META_MAGIC.length + 1 + 1 + 1 + 1 + 4 + 4 + 4;
+
+/** flags 字节位 */
+const FLAG_OVERLAY = 1;
+const FLAG_PACK = 2;
+/** 载荷为原始文件字节（否则为位图或专业参数） */
+const FLAG_FILE_PAYLOAD = 4;
+/** 可见像素即密文（像素级布局）：决定 MAC 覆盖像素还是载荷 */
+const FLAG_PIXEL_CIPHER = 8;
+
+/**
+ * 载荷形态：
+ * - `mode` 位图或专业参数 JSON（随模式而定）
+ * - `file` 原始文件字节（单文件或容器），解密端直接还原为原文件
+ */
+export type PayloadKind = 'mode' | 'file';
 
 const PROT_CODE: Record<Protection, number> = { none: 0, password: 1, keyfile: 2 };
 const PROT_FROM: readonly Protection[] = ['none', 'password', 'keyfile'];
@@ -38,6 +54,9 @@ export interface MetaFields {
   /** 多图合并标志 */
   pack: boolean;
   protection: Protection;
+  payloadKind: PayloadKind;
+  /** 可见像素即密文：解密端据此确定 MAC 覆盖范围 */
+  pixelCipher: boolean;
   /** scramble: blockSize / overlay: opacity% */
   p1: number;
   /** scramble: noise / overlay: fit */
@@ -101,8 +120,11 @@ export function buildMeta(f: MetaFields, payload: Uint8Array): Uint8Array {
   const dv = new DataView(out.buffer);
   out.set(META_MAGIC, 0);
   let o = META_MAGIC.length;
-  // mode 低比特：0=scramble 1=overlay；bit1：pack
-  out[o++] = (f.mode === 'scramble' ? 0 : 1) | (f.pack ? 2 : 0);
+  out[o++] =
+    (f.mode === 'scramble' ? 0 : FLAG_OVERLAY) |
+    (f.pack ? FLAG_PACK : 0) |
+    (f.payloadKind === 'file' ? FLAG_FILE_PAYLOAD : 0) |
+    (f.pixelCipher ? FLAG_PIXEL_CIPHER : 0);
   out[o++] = PROT_CODE[f.protection];
   out[o++] = f.p1 & 0xff;
   out[o++] = f.p2 & 0xff;
@@ -125,8 +147,10 @@ export function parseMeta(buf: Uint8Array): { fields: MetaFields; payload: Uint8
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   let o = META_MAGIC.length;
   const modeCode = buf[o++];
-  const mode: Mode = (modeCode & 1) === 1 ? 'overlay' : 'scramble';
-  const pack = (modeCode & 2) !== 0;
+  const mode: Mode = (modeCode & FLAG_OVERLAY) !== 0 ? 'overlay' : 'scramble';
+  const pack = (modeCode & FLAG_PACK) !== 0;
+  const payloadKind: PayloadKind = (modeCode & FLAG_FILE_PAYLOAD) !== 0 ? 'file' : 'mode';
+  const pixelCipher = (modeCode & FLAG_PIXEL_CIPHER) !== 0;
   const protection = PROT_FROM[buf[o++]] ?? 'none';
   const p1 = buf[o++];
   const p2 = buf[o++];
@@ -135,7 +159,7 @@ export function parseMeta(buf: Uint8Array): { fields: MetaFields; payload: Uint8
   const payloadLen = dv.getUint32(o, true); o += 4;
   if (o + payloadLen > buf.length) throw new Error('元数据被截断');
   return {
-    fields: { mode, pack, protection, p1, p2, origWidth, origHeight },
+    fields: { mode, pack, protection, payloadKind, pixelCipher, p1, p2, origWidth, origHeight },
     payload: buf.slice(o, o + payloadLen),
   };
 }

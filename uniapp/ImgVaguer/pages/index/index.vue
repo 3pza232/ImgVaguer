@@ -41,6 +41,7 @@ import {
   settings,
   stepBatch,
   store,
+  type BusyTask,
 } from '@/stores/session';
 // #ifdef APP-PLUS
 import { saveSettings } from '@/stores/session';
@@ -86,6 +87,10 @@ const opOptions = [
 const modeOptions = [
   { value: 'scramble', label: '密文混淆' },
   { value: 'overlay', label: '覆盖合成' },
+];
+const layoutOptions = [
+  { value: 'payload', label: '载荷级' },
+  { value: 'pixel', label: '像素级' },
 ];
 const protectOptions = [
   { value: 'none', label: '无' },
@@ -185,17 +190,18 @@ const resStyle = computed(() => {
 });
 
 /** 缩略图条用（小图，列表滚动轻量） */
-const inputThumbs = computed(() => store.targets.map((t) => ({ src: t.thumb, name: t.name })));
+// 预览直接用原图路径：不为预览再解码编码一遍，也避开原生画布的尺寸限制
+const inputThumbs = computed(() => store.targets.map((t) => ({ src: t.path, name: t.name })));
 const coverThumbs = computed(() =>
   store.op === 'encrypt' && store.mode === 'overlay'
-    ? store.covers.map((c) => ({ src: c.thumb, name: c.name }))
+    ? store.covers.map((c) => ({ src: c.path, name: c.name }))
     : [],
 );
 /** 堆叠预览与放大用（大图，避免放大发糊） */
-const inputImages = computed(() => store.targets.map((t) => ({ src: t.preview, name: t.name })));
+const inputImages = computed(() => store.targets.map((t) => ({ src: t.path, name: t.name })));
 const coverImages = computed(() =>
   store.op === 'encrypt' && store.mode === 'overlay'
-    ? store.covers.map((c) => ({ src: c.preview, name: c.name }))
+    ? store.covers.map((c) => ({ src: c.path, name: c.name }))
     : [],
 );
 const outputImages = computed(() =>
@@ -204,6 +210,9 @@ const outputImages = computed(() =>
 
 const showCovers = computed(() => store.op === 'encrypt' && store.mode === 'overlay');
 const execLabel = computed(() => (store.op === 'encrypt' ? '[ 执行加密 ]' : '[ 执行解密 ]'));
+/** 执行中的按钮文案：只说明在做什么，细节留给日志 */
+const busyLabels: Record<BusyTask, string> = { encrypt: '加密中…', decrypt: '解密中…', export: '导出中…' };
+const busyLabel = computed(() => (store.busy ? busyLabels[store.busy] : ''));
 /** 高迭代提示阈值（纯 TS 派生路径下耗时明显） */
 const KDF_WARN = 1000000;
 
@@ -357,6 +366,7 @@ export default {
         <ThumbStrip
           :items="inputThumbs"
           :add-label="store.op === 'encrypt' ? '选图' : '选密文图'"
+          :can-add="store.targets.length < settings.maxTargets"
           @add="onPickImages"
           @remove="removeTarget"
           @preview="previewMain"
@@ -379,6 +389,8 @@ export default {
           add-label="加图层"
           orderable
           show-index
+          mode="aspectFit"
+          :can-add="store.covers.length < settings.maxCoverLayers"
           @add="pickCovers"
           @remove="removeCover"
           @move="onMoveCover"
@@ -476,59 +488,68 @@ export default {
 
         <template v-if="store.mode === 'scramble'">
           <view class="row-between">
-            <text class="hint">噪声强度</text>
-            <text class="val">{{ store.noise }}</text>
+            <text class="hint">可见像素布局</text>
           </view>
-          <slider
-            :value="store.noise"
-            :min="0"
-            :max="64"
-            :step="1"
-            activeColor="#93c572"
-            backgroundColor="#243020"
-            block-size="20"
-            @change="store.noise = onSliderValue($event)"
-          />
-          <view class="row-between">
-            <text class="hint">变换轮数</text>
-            <text class="val">{{ store.rounds }}</text>
-          </view>
-          <slider
-            :value="store.rounds"
-            :min="1"
-            :max="4"
-            :step="1"
-            activeColor="#93c572"
-            backgroundColor="#243020"
-            block-size="20"
-            @change="store.rounds = onSliderValue($event)"
-          />
-          <view class="row-between">
-            <text class="hint">分块尺寸</text>
-            <view class="chips-inline">
-              <text
-                v-for="b in [8, 16, 32]"
-                :key="b"
-                class="chip"
-                :class="{ on: store.blockSize === b }"
-                @click="store.blockSize = b as 8 | 16 | 32"
-              >
-                {{ b }}px
-              </text>
+          <SegBar v-model="store.layout" :options="layoutOptions" />
+          <text v-if="store.layout === 'payload'" class="hint">
+            可见像素为块状噪声装饰图，原图经压缩加密存于数据块，体积约为像素级的 1/2。
+          </text>
+          <template v-else>
+            <view class="row-between">
+              <text class="hint">噪声强度</text>
+              <text class="val">{{ store.noise }}</text>
             </view>
-          </view>
-          <view class="row-between">
-            <text class="hint">S 盒字节替换</text>
-            <ToggleSwitch v-model="store.sbox" />
-          </view>
-          <view class="row-between">
-            <text class="hint">行列循环移位</text>
-            <ToggleSwitch v-model="store.rowshift" />
-          </view>
-          <view class="row-between">
-            <text class="hint">全局像素置换（大图较慢）</text>
-            <ToggleSwitch v-model="store.globalPerm" />
-          </view>
+            <slider
+              :value="store.noise"
+              :min="0"
+              :max="64"
+              :step="1"
+              activeColor="#93c572"
+              backgroundColor="#243020"
+              block-size="20"
+              @change="store.noise = onSliderValue($event)"
+            />
+            <view class="row-between">
+              <text class="hint">变换轮数</text>
+              <text class="val">{{ store.rounds }}</text>
+            </view>
+            <slider
+              :value="store.rounds"
+              :min="1"
+              :max="4"
+              :step="1"
+              activeColor="#93c572"
+              backgroundColor="#243020"
+              block-size="20"
+              @change="store.rounds = onSliderValue($event)"
+            />
+            <view class="row-between">
+              <text class="hint">分块尺寸</text>
+              <view class="chips-inline">
+                <text
+                  v-for="b in [8, 16, 32]"
+                  :key="b"
+                  class="chip"
+                  :class="{ on: store.blockSize === b }"
+                  @click="store.blockSize = b as 8 | 16 | 32"
+                >
+                  {{ b }}px
+                </text>
+              </view>
+            </view>
+            <view class="row-between">
+              <text class="hint">S 盒字节替换</text>
+              <ToggleSwitch v-model="store.sbox" />
+            </view>
+            <view class="row-between">
+              <text class="hint">行列循环移位</text>
+              <ToggleSwitch v-model="store.rowshift" />
+            </view>
+            <view class="row-between">
+              <text class="hint">全局像素置换（大图较慢）</text>
+              <ToggleSwitch v-model="store.globalPerm" />
+            </view>
+          </template>
         </template>
 
         <template v-else>
@@ -626,7 +647,7 @@ export default {
     <!-- 底部常驻执行（含安全区） -->
     <view class="footer">
       <view class="exec" :class="{ busy: store.busy }" hover-class="pressed" @click="store.busy ? null : execute()">
-        {{ store.busy ? (store.progress || '处理中…') : execLabel }}
+        {{ store.busy ? busyLabel : execLabel }}
       </view>
     </view>
 

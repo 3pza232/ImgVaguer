@@ -12,8 +12,12 @@ withDefaults(
     /** 层序调整（混淆图层用 ↑↓ 替代桌面拖拽） */
     orderable?: boolean;
     showIndex?: boolean;
+    /** 填充方式：照片铺满用 aspectFill；需看清整层内容用 aspectFit */
+    mode?: 'aspectFit' | 'aspectFill';
+    /** 是否还能继续追加：达到上限时隐藏入口，避免点了才知道满了 */
+    canAdd?: boolean;
   }>(),
-  { addLabel: '添加', orderable: false, showIndex: false },
+  { addLabel: '添加', orderable: false, showIndex: false, mode: 'aspectFill', canAdd: true },
 );
 
 const emit = defineEmits<{
@@ -30,7 +34,7 @@ const emit = defineEmits<{
       <view class="row">
         <view v-for="(it, i) in items" :key="it.name + i" class="cell">
           <view class="frame" @click="emit('preview', i)">
-            <image class="pic" :src="it.src" mode="aspectFill" />
+            <image class="pic" :src="it.src" :mode="mode" />
             <text class="x" @click.stop="emit('remove', i)">×</text>
             <text v-if="showIndex" class="idx">L{{ i + 1 }}</text>
           </view>
@@ -39,7 +43,7 @@ const emit = defineEmits<{
             <text class="op" :class="{ off: i === items.length - 1 }" @click.stop="emit('move', i, i + 1)">↓</text>
           </view>
         </view>
-        <view class="cell">
+        <view v-if="canAdd" class="cell">
           <view class="add" @click="emit('add')">
             <text class="plus">＋</text>
             <text class="add-label">{{ addLabel }}</text>

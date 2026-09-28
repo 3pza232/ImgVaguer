@@ -90,33 +90,45 @@ function onCoverDrop(i: number): void {
 
       <template v-if="store.mode === 'scramble'">
         <div class="row">
-          <label>分块尺寸</label>
-          <select v-model.number="store.blockSize">
-            <option :value="8">8 px（细粒度）</option>
-            <option :value="16">16 px（均衡）</option>
-            <option :value="32">32 px（粗粒度）</option>
+          <label>可见像素布局</label>
+          <select v-model="store.layout">
+            <option value="payload">载荷级（原图入加密载荷，体积小）</option>
+            <option value="pixel">像素级（可见像素即密文，体积大）</option>
           </select>
         </div>
-        <div class="row">
-          <label>噪声强度 <span class="val">{{ store.noise }}</span></label>
-          <input v-model.number="store.noise" type="range" min="0" max="64" step="1" />
+        <div v-if="store.layout === 'payload'" class="hint" style="margin-bottom: 9px">
+          可见像素为块状噪声装饰图，原图经滤波压缩后加密存于数据块，体积约为像素级的 1/2。
         </div>
-        <div class="row">
-          <label>变换轮数 <span class="val">{{ store.rounds }}</span></label>
-          <input v-model.number="store.rounds" type="range" min="1" max="4" step="1" />
-        </div>
-        <div class="row inline">
-          <input id="sbox" v-model="store.sbox" type="checkbox" />
-          <label for="sbox">S 盒字节替换</label>
-        </div>
-        <div class="row inline">
-          <input id="rowshift" v-model="store.rowshift" type="checkbox" />
-          <label for="rowshift">行列循环移位</label>
-        </div>
-        <div class="row inline">
-          <input id="gperm" v-model="store.globalPerm" type="checkbox" />
-          <label for="gperm">全局像素置换（大图较慢）</label>
-        </div>
+        <template v-else>
+          <div class="row">
+            <label>分块尺寸</label>
+            <select v-model.number="store.blockSize">
+              <option :value="8">8 px（细粒度）</option>
+              <option :value="16">16 px（均衡）</option>
+              <option :value="32">32 px（粗粒度）</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>噪声强度 <span class="val">{{ store.noise }}</span></label>
+            <input v-model.number="store.noise" type="range" min="0" max="64" step="1" />
+          </div>
+          <div class="row">
+            <label>变换轮数 <span class="val">{{ store.rounds }}</span></label>
+            <input v-model.number="store.rounds" type="range" min="1" max="4" step="1" />
+          </div>
+          <div class="row inline">
+            <input id="sbox" v-model="store.sbox" type="checkbox" />
+            <label for="sbox">S 盒字节替换</label>
+          </div>
+          <div class="row inline">
+            <input id="rowshift" v-model="store.rowshift" type="checkbox" />
+            <label for="rowshift">行列循环移位</label>
+          </div>
+          <div class="row inline">
+            <input id="gperm" v-model="store.globalPerm" type="checkbox" />
+            <label for="gperm">全局像素置换（大图较慢）</label>
+          </div>
+        </template>
       </template>
 
       <template v-else>

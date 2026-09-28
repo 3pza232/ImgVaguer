@@ -1,6 +1,17 @@
 /** 图像 IO：文件解码、缩放、预览、下载（DOM 层） */
 import type { Raster } from '@/core/types';
 
+/**
+ * 仅取尺寸而不取像素。
+ * 载荷布局与多图合并只需要尺寸，读一次像素图要付出整幅 RGBA 的分配与拷贝。
+ */
+export async function fileToSize(file: Blob): Promise<{ width: number; height: number }> {
+  const bmp = await createImageBitmap(file);
+  const size = { width: bmp.width, height: bmp.height };
+  bmp.close();
+  return size;
+}
+
 export async function fileToRaster(file: Blob): Promise<Raster> {
   const bmp = await createImageBitmap(file);
   const canvas = document.createElement('canvas');

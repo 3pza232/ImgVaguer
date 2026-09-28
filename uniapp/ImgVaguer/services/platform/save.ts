@@ -15,10 +15,10 @@ function toast(title: string): void {
   uni.showToast({ title, icon: 'none', duration: 2000 });
 }
 
-/** 保存图片：H5 下载 / 小程序相册（App 见 services/export.ts） */
-export async function saveImage(bytes: Uint8Array, name: string): Promise<SaveOutcome> {
+/** 保存图片：H5 下载 / 小程序相册（App 见 services/export.ts）；mime 由文件扩展名决定 */
+export async function saveImage(bytes: Uint8Array, name: string, mime = 'image/png'): Promise<SaveOutcome> {
   // #ifdef H5
-  const blob = new Blob([bytes as unknown as BlobPart], { type: 'image/png' });
+  const blob = new Blob([bytes as unknown as BlobPart], { type: mime });
   const url = URL.createObjectURL(blob);
   try {
     const a = document.createElement('a');
@@ -54,6 +54,7 @@ export async function saveImage(bytes: Uint8Array, name: string): Promise<SaveOu
   }
   // #endif
   // #ifdef APP-PLUS
+  void mime;
   return { ok: false, message: 'App 端图片导出走 services/export 通道，不应调用此项' };
   // #endif
 }

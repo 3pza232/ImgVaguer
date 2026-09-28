@@ -8,11 +8,9 @@
  *   fingerprint: <SHA-256 前 8 字节 hex>
  *   --
  *   <种子 Base64，按行折行>
- * 兼容旧版单行格式：`IMGVAGUER-KEY v1\n<Base64>`。
  */
 
 export const KEY_MAGIC = 'IMGVAGUER KEYFILE';
-const LEGACY_MAGIC = 'IMGVAGUER-KEY v1';
 export const KEY_SEED_LEN = 32;
 const WRAP = 48;
 
@@ -58,13 +56,9 @@ export async function generateKeyFile(seed: Uint8Array): Promise<string> {
 
 export function parseKeyFile(text: string): Uint8Array {
   const lines = text.split(/\r?\n/);
-  const first = lines[0]?.trim() ?? '';
-  const isLegacy = first === LEGACY_MAGIC;
-  if (!isLegacy && !first.startsWith(KEY_MAGIC)) throw new Error('非法的密钥文件（缺少文件头）');
+  if (!(lines[0]?.trim() ?? '').startsWith(KEY_MAGIC)) throw new Error('非法的密钥文件（缺少文件头）');
   const sep = lines.findIndex((l) => l.trim() === '--');
-  const bodyLines = isLegacy ? lines.slice(1) : lines.slice(sep >= 0 ? sep + 1 : 1);
-  const b64 = bodyLines.join('').replace(/\s+/g, '');
-  const seed = fromBase64(b64);
+  const seed = fromBase64(lines.slice(sep >= 0 ? sep + 1 : 1).join('').replace(/\s+/g, ''));
   if (seed.length !== KEY_SEED_LEN) throw new Error('密钥长度非法');
   return seed;
 }

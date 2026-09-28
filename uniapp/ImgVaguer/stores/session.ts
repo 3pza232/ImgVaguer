@@ -1,19 +1,28 @@
 /** 轻量响应式会话状态 + uni 存储持久化（结构对齐桌面版，去掉 DOM 专属字段） */
-import type { Mode, Protection, Raster } from '@/core/types';
+import type { Mode, Protection, Raster, ScrambleLayout } from '@/core/types';
 // 仅类型引用（编译期擦除）：设置中的导出目录由平台层定义
 import type { ExportTree } from '@/services/platform/app-storage';
 import { getItem, setItem } from '@/services/platform/storage';
 import { reactive, watch } from 'vue';
 
-export interface TargetItem {
+/**
+ * 已选图像。位图不常驻：载荷布局与多图合并只需尺寸，
+ * 必须像素时才（像素级布局 / 覆盖合成）按 path 解码，避免批量大图耗尽内存。
+ * path 同时是显示源：列表、堆叠预览与放大都用它，不再为预览单独解码编码一遍。
+ */
+interface PickedImage {
   name: string;
-  /** 选图产生的临时路径（解密时据此读回原始字节） */
+  /** 解码与读取来源，同时作为预览源：选图路径，或默认混淆图的 data URL */
   path: string;
-  raster: Raster;
-  /** 缩略图（列表 / 图层条，256px） */
-  thumb: string;
-  /** 较大预览（堆叠预览与放大，1280px） */
-  preview: string;
+  width: number;
+  height: number;
+}
+
+export type TargetItem = PickedImage;
+
+/** 混淆图层：持位图缓存，批量加密时同一层不会重复解码 */
+export interface CoverItem extends PickedImage {
+  raster?: Raster;
 }
 
 /** 一次加密批次共用的密钥文件（供结果随时导出） */
@@ -37,6 +46,9 @@ export interface ResultBatch {
 
 export type LogLevel = 'info' | 'detail';
 
+/** 进行中的任务：既作"忙"标志，也决定底部按钮文案 */
+export type BusyTask = 'encrypt' | 'decrypt' | 'export';
+
 export interface LogLine {
   time: string;
   level: LogLevel;
@@ -46,6 +58,7 @@ export interface LogLine {
 export interface SavedParams {
   protection: Protection;
   pack: boolean;
+  layout: ScrambleLayout;
   iterations: number;
   blockSize: 8 | 16 | 32;
   noise: number;
@@ -66,6 +79,10 @@ export interface Settings {
   defaultCoverMaxMB: number;
   /** 混淆图层数量上限 */
   maxCoverLayers: number;
+  /** 单批目标图数量上限 */
+  maxTargets: number;
+  /** 单张图像像素上限 */
+  maxPixels: number;
   /** 导出存储位置（App：用户在系统文件管理器中自选的目录；null 表示未选择，首次导出时引导） */
   exportTree: ExportTree | null;
   params: SavedParams;
@@ -76,6 +93,7 @@ const SETTINGS_KEY = 'imgvaguer.settings.v1';
 const defaultParams: SavedParams = {
   protection: 'password',
   pack: false,
+  layout: 'payload',
   iterations: 200000,
   blockSize: 16,
   noise: 16,
@@ -88,13 +106,32 @@ const defaultParams: SavedParams = {
   rowshift: true,
 };
 
+/** 合并张数上限区间：上限 4 控制手机上的体积与内存 */
+export const TARGET_MIN = 1;
+export const TARGET_MAX = 4;
+/** 混淆图层数上限区间 */
+export const COVER_MIN = 1;
+export const COVER_MAX = 3;
+
+/** 收敛到可选区间（旧版本可能留下越界值） */
+export function clampTargets(n: number): number {
+  return Math.min(Math.max(Math.round(n), TARGET_MIN), TARGET_MAX);
+}
+
+/** 同上，用于混淆图层数 */
+export function clampCovers(n: number): number {
+  return Math.min(Math.max(Math.round(n), COVER_MIN), COVER_MAX);
+}
+
 function loadSettings(): Settings {
   const fallback: Settings = {
     rememberParams: true,
     defaultPassword: '',
     defaultCover: null,
     defaultCoverMaxMB: 1.5,
-    maxCoverLayers: 4,
+    maxCoverLayers: 3,
+    maxTargets: 4,
+    maxPixels: 20_000_000,
     exportTree: null,
     params: { ...defaultParams },
   };
@@ -107,7 +144,9 @@ function loadSettings(): Settings {
       defaultPassword: s.defaultPassword ?? '',
       defaultCover: s.defaultCover ?? null,
       defaultCoverMaxMB: s.defaultCoverMaxMB ?? 1.5,
-      maxCoverLayers: s.maxCoverLayers ?? 4,
+      maxCoverLayers: clampCovers(s.maxCoverLayers ?? 3),
+      maxTargets: clampTargets(s.maxTargets ?? 4),
+      maxPixels: s.maxPixels ?? 20_000_000,
       exportTree: s.exportTree ?? null,
       params: { ...defaultParams, ...(s.params ?? {}) },
     };
@@ -124,6 +163,7 @@ export const store = reactive({
   protection: 'password' as Protection,
   pack: false,
   password: '',
+  layout: 'payload' as ScrambleLayout,
   iterations: 200000,
   blockSize: 16 as 8 | 16 | 32,
   noise: 16,
@@ -137,7 +177,7 @@ export const store = reactive({
 
   targets: [] as TargetItem[],
   /** 混淆图层，按下层→上层排列 */
-  covers: [] as TargetItem[],
+  covers: [] as CoverItem[],
   /** 目标图所在层：位于其下方的混淆图数量 */
   targetLayer: 0,
   /** 解密用密钥（载入的文件或粘贴的文本） */
@@ -147,9 +187,7 @@ export const store = reactive({
   batchIndex: 0,
   logs: [] as LogLine[],
   logView: 'brief' as 'brief' | 'detail',
-  /** 长任务进度描述（显示于状态区） */
-  progress: '',
-  busy: false,
+  busy: null as BusyTask | null,
 });
 
 if (settings.rememberParams) {
@@ -157,6 +195,7 @@ if (settings.rememberParams) {
   Object.assign(store, {
     protection: p.protection,
     pack: p.pack,
+    layout: p.layout,
     iterations: p.iterations,
     blockSize: p.blockSize,
     noise: p.noise,
@@ -184,6 +223,7 @@ export function saveSettings(): void {
   settings.params = {
     protection: store.protection,
     pack: store.pack,
+    layout: store.layout,
     iterations: store.iterations,
     blockSize: store.blockSize,
     noise: store.noise,
@@ -202,6 +242,7 @@ watch(
   () => [
     store.protection,
     store.pack,
+    store.layout,
     store.iterations,
     store.blockSize,
     store.noise,

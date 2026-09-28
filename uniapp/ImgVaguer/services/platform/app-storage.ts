@@ -106,12 +106,21 @@ function scanMedia(path: string, mime: string): void {
   }
 }
 
+/**
+ * 分块写入大小。
+ * 桥接层只认 JS 数字数组，整幅转换会为大文件申请数百 MB（每字节一个数字）
+ * 并在桥接时逐个复制；分块后内存占用与 GC 压力都与文件大小无关。
+ */
+const WRITE_CHUNK = 256 * 1024;
+
 /** 写字节到指定文件路径并核对落盘长度（不多写、不少写） */
 export function writeBytesToPath(path: string, bytes: Uint8Array): void {
   const FileOutputStream = plus.android.importClass('java.io.FileOutputStream') as new (p: string) => JavaOut;
   const out = new FileOutputStream(path);
   try {
-    out.write(toJavaBytes(bytes));
+    for (let at = 0; at < bytes.length; at += WRITE_CHUNK) {
+      out.write(toJavaBytes(bytes.subarray(at, at + WRITE_CHUNK)));
+    }
     out.flush();
   } finally {
     out.close();
@@ -148,6 +157,13 @@ export async function writePrivateFile(name: string, bytes: Uint8Array): Promise
   const path = await privateDocPath(name);
   writeBytesToPath(path, bytes);
   return path;
+}
+
+/** 同上，但返回 plus.io 本地 URL（可交给 <image> 渲染） */
+export async function writePrivateFileUrl(name: string, bytes: Uint8Array): Promise<string> {
+  const path = await privateDocPath(name);
+  writeBytesToPath(path, bytes);
+  return `file://${path}`;
 }
 
 /** 打开「打开方式」→ 文件夹选择器，取回并持久化目录授权，同时反解真实路径 */

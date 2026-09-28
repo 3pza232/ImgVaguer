@@ -15,8 +15,18 @@ import { log } from '@/stores/session';
 import { canvasBox } from '@/services/platform/canvas-box';
 // #endif
 import { topInset } from '@/services/platform/system';
-import { applyDefaultPassword, saveSettings, settings } from '@/stores/session';
-import { computed, nextTick, onMounted, ref } from 'vue';
+import {
+  applyDefaultPassword,
+  clampCovers,
+  clampTargets,
+  COVER_MAX,
+  COVER_MIN,
+  saveSettings,
+  settings,
+  TARGET_MAX,
+  TARGET_MIN,
+} from '@/stores/session';
+import { nextTick, onMounted, ref } from 'vue';
 
 // #ifdef APP-PLUS
 /**
@@ -55,16 +65,19 @@ function measureHead(): void {
 const password = ref('');
 const maxMB = ref(settings.defaultCoverMaxMB);
 const layers = ref(settings.maxCoverLayers);
+const targets = ref(settings.maxTargets);
+/** 像素上限以「万像素」编辑，落库仍为像素数 */
+const pixels = ref(Math.round(settings.maxPixels / 10000));
 
 const showDocs = ref(false);
-/** 文档面板展开时锁定页面滚动，避免背景跟随滑动 */
-const docsLockStyle = computed(() => (showDocs.value ? 'overflow: hidden;' : ''));
 
 /** 进入页面时同步一次本地编辑值，避免上次未提交的残留 */
 function sync(): void {
   password.value = settings.defaultPassword;
   maxMB.value = settings.defaultCoverMaxMB;
   layers.value = settings.maxCoverLayers;
+  targets.value = settings.maxTargets;
+  pixels.value = Math.round(settings.maxPixels / 10000);
 }
 
 onMounted(() => {
@@ -93,8 +106,21 @@ function stepMaxMB(d: number): void {
 }
 
 function stepLayers(d: number): void {
-  layers.value = Math.round(clamp(layers.value + d, 1, 8));
+  layers.value = clampCovers(layers.value + d);
   settings.maxCoverLayers = layers.value;
+  saveSettings();
+}
+
+function stepTargets(d: number): void {
+  targets.value = clampTargets(targets.value + d);
+  settings.maxTargets = targets.value;
+  saveSettings();
+}
+
+/** 像素上限按「千万像素」档调节：逐万调整要按上百次才挪得动 */
+function stepPixels(d: number): void {
+  pixels.value = Math.round(clamp(pixels.value + d, 1000, 6000));
+  settings.maxPixels = pixels.value * 10000;
   saveSettings();
 }
 
@@ -107,9 +133,8 @@ function commitPassword(): void {
 </script>
 
 <template>
-  <!-- page-meta 置于页面根节点：文档面板展开时锁定页面滚动 -->
-  <page-meta :page-style="docsLockStyle" />
-
+  <!-- 文档面板为整屏浮层，遮罩本身即拦截交互；不再用 page-meta 锁滚动：
+       实测关闭后页面滚动无法恢复，得不偿失 -->
   <view class="page" :style="{ paddingTop: headHeight + 'px' }">
     <view class="head" :style="{ paddingTop: padTop + 12 + 'px' }">
       <text class="title">─ 设置</text>
@@ -164,8 +189,30 @@ function commitPassword(): void {
           <text class="sval">{{ layers }} 层</text>
           <text class="sbtn" @click="stepLayers(1)">＋</text>
         </view>
-        <text class="hint tip">1–8 层</text>
+        <text class="hint tip">{{ COVER_MIN }}–{{ COVER_MAX }} 层</text>
       </view>
+    </view>
+
+    <view class="sec">
+      <text class="label">批量上限</text>
+      <view class="row">
+        <text class="hint">目标图数量</text>
+        <view class="stepper push">
+          <text class="sbtn" @click="stepTargets(-1)">−</text>
+          <text class="sval">{{ targets }} 张</text>
+          <text class="sbtn" @click="stepTargets(1)">＋</text>
+        </view>
+      </view>
+      <text class="hint">{{ TARGET_MIN }}–{{ TARGET_MAX }} 张</text>
+      <view class="row">
+        <text class="hint">单张像素上限</text>
+        <view class="stepper push">
+          <text class="sbtn" @click="stepPixels(-1000)">−</text>
+          <text class="sval">{{ pixels }} 万</text>
+          <text class="sbtn" @click="stepPixels(1000)">＋</text>
+        </view>
+      </view>
+      <text class="hint">合并张数越多，输出体积越接近各原文件之和；像素上限用于挡掉一解码就耗尽内存的巨图。</text>
     </view>
 
     <view class="sec">

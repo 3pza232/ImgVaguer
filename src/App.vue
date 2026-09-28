@@ -148,7 +148,7 @@ function closeDocs(): void {
           <div v-if="store.targets.length" class="file-list">
             <div v-for="(t, i) in store.targets" :key="t.name + i" class="item">
               <span class="fname" :title="t.name">{{ t.name }}</span>
-              <span class="dims">{{ t.raster.width }}x{{ t.raster.height }}</span>
+              <span class="dims">{{ t.width }}x{{ t.height }}</span>
               <button class="link del" title="移除" @click="removeTarget(i)">×</button>
             </div>
             <div class="item foot">

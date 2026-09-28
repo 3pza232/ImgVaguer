@@ -1,11 +1,23 @@
 <script setup lang="ts">
 import { clearDefaultCover, setDefaultCover } from '@/services/actions';
-import { saveSettings, settings } from '@/stores/session';
+import {
+  clampCovers,
+  clampTargets,
+  COVER_MAX,
+  COVER_MIN,
+  saveSettings,
+  settings,
+  TARGET_MAX,
+  TARGET_MIN,
+} from '@/stores/session';
 import { ref } from 'vue';
 
 const emit = defineEmits<{ (e: 'close'): void; (e: 'docs'): void }>();
 
 const coverInput = ref<HTMLInputElement>();
+
+/** 像素上限档位：合并体积随张数线性增长，故给足跨度而不放任无界 */
+const pixelChoices = [20_000_000, 40_000_000, 60_000_000];
 
 function onCoverPick(e: Event): void {
   const el = e.target as HTMLInputElement;
@@ -28,7 +40,24 @@ function adjustMaxMB(d: number): void {
 }
 
 function adjustMaxLayers(d: number): void {
-  settings.maxCoverLayers = Math.round(clamp(settings.maxCoverLayers + d, 1, 8));
+  settings.maxCoverLayers = clampCovers(settings.maxCoverLayers + d);
+  saveSettings();
+}
+
+/** 手动输入后收敛到区间，避免越界值留在设置里 */
+function commitMaxLayers(): void {
+  settings.maxCoverLayers = clampCovers(settings.maxCoverLayers);
+  saveSettings();
+}
+
+function adjustMaxTargets(d: number): void {
+  settings.maxTargets = clampTargets(settings.maxTargets + d);
+  saveSettings();
+}
+
+/** 手动输入后收敛到区间，避免越界值留在设置里 */
+function commitMaxTargets(): void {
+  settings.maxTargets = clampTargets(settings.maxTargets);
   saveSettings();
 }
 </script>
@@ -98,15 +127,43 @@ function adjustMaxLayers(d: number): void {
             <input
               v-model.number="settings.maxCoverLayers"
               type="number"
-              min="1"
-              max="8"
+              :min="COVER_MIN"
+              :max="COVER_MAX"
               step="1"
-              @change="saveSettings"
+              @change="commitMaxLayers"
             />
             <button class="num-btn" title="增加" @click="adjustMaxLayers(1)">+</button>
           </span>
-          <span class="hint" style="margin-top: 0">层（1–8）</span>
+          <span class="hint" style="margin-top: 0">层（{{ COVER_MIN }}–{{ COVER_MAX }}）</span>
         </div>
+      </div>
+
+      <div class="set-sec">
+        <div class="set-label">批量上限</div>
+        <div class="row inline">
+          <label for="maxtargets">目标图数量</label>
+          <span class="num-wrap">
+            <button class="num-btn" title="减少" @click="adjustMaxTargets(-1)">−</button>
+            <input
+              id="maxtargets"
+              v-model.number="settings.maxTargets"
+              type="number"
+              :min="TARGET_MIN"
+              :max="TARGET_MAX"
+              step="1"
+              @change="commitMaxTargets"
+            />
+            <button class="num-btn" title="增加" @click="adjustMaxTargets(1)">+</button>
+          </span>
+          <span class="hint" style="margin-top: 0">张（{{ TARGET_MIN }}–{{ TARGET_MAX }}）</span>
+        </div>
+        <div class="row inline" style="margin-bottom: 0">
+          <label>单张像素上限</label>
+          <select v-model.number="settings.maxPixels" @change="saveSettings">
+            <option v-for="p in pixelChoices" :key="p" :value="p">{{ p / 10000 }} 万</option>
+          </select>
+        </div>
+        <div class="hint">合并张数越多，输出体积越接近各原文件之和；像素上限用于挡掉解码即耗尽内存的巨图。</div>
       </div>
 
       <div class="set-sec">

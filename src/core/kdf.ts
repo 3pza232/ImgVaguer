@@ -1,5 +1,6 @@
 /**
- * 密钥派生：PBKDF2-SHA256 → 主密钥 → 标签化 SHA-256 展开子密钥。
+ * 密钥派生：字节凭据 → 主密钥（口令走 PBKDF2-SHA256，全熵种子走 HKDF-SHA256）
+ * → 标签化 SHA-256 展开子密钥。
  * 子密钥按用途隔离（置换 / 异或流 / 噪声 / MAC / 载荷 / 元数据），避免跨域复用。
  */
 
@@ -9,7 +10,7 @@ async function sha256(data: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.digest('SHA-256', data));
 }
 
-/** 由任意字节凭据（口令 / 密钥文件 / 内嵌种子）派生 256 位主密钥 */
+/** 由低熵凭据（口令）派生 256 位主密钥：PBKDF2 的迭代拉伸用于抬高枚举成本 */
 export async function deriveMasterKey(
   secret: Uint8Array,
   salt: Uint8Array,
@@ -22,6 +23,23 @@ export async function deriveMasterKey(
     256,
   );
   return new Uint8Array(bits);
+}
+
+/**
+ * HKDF-SHA256 单块派生（RFC 5869，输出 32B）。
+ * 用于全熵凭据（密钥文件种子 / 内嵌种子）：对高熵密钥做迭代拉伸不增加任何强度，
+ * 只会平白耗费数秒；info 用于隔离不同用途的派生域。
+ */
+export async function hkdfSha256(
+  ikm: Uint8Array,
+  salt: Uint8Array,
+  info: string,
+): Promise<Uint8Array> {
+  const label = enc.encode(info);
+  const block = new Uint8Array(label.length + 1);
+  block.set(label);
+  block[label.length] = 1;
+  return hmacSha256(await hmacSha256(salt, ikm), block);
 }
 
 /** 口令字符串 → 字节凭据 */

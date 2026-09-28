@@ -1,12 +1,30 @@
 /** 轻量响应式会话状态 + localStorage 设置持久化（不引入 Pinia，保持低依赖） */
-import type { Mode, Protection, Raster } from '@/core/types';
+import type { Mode, Protection, Raster, ScrambleLayout } from '@/core/types';
 import { reactive, watch } from 'vue';
 
+/**
+ * 已选目标图。位图不在此常驻：载荷布局与多图合并只需尺寸，
+ * 必要时（像素级布局 / 覆盖合成）才由 actions 按需解码，避免批量大图耗尽内存。
+ */
 export interface TargetItem {
   name: string;
   file: File;
-  raster: Raster;
   url: string;
+  width: number;
+  height: number;
+}
+
+/**
+ * 覆盖图层：预览直接用原文件 URL，故载入只需尺寸；
+ * 位图在合成时按需解码并缓存（层数受设置约束，批量加密不会重复解码）。
+ */
+export interface CoverItem {
+  name: string;
+  file: File;
+  url: string;
+  width: number;
+  height: number;
+  raster?: Raster;
 }
 
 /** 一次加密批次共用的密钥文件（供结果随时下载） */
@@ -39,8 +57,9 @@ export interface LogLine {
 
 export interface SavedParams {
   protection: Protection;
-  /** 多图合并（仅密钥文件保护下生效） */
+  /** 多图合并：把本批全部目标图并入一张输出 */
   pack: boolean;
+  layout: ScrambleLayout;
   iterations: number;
   blockSize: 8 | 16 | 32;
   noise: number;
@@ -62,6 +81,10 @@ export interface Settings {
   defaultCoverMaxMB: number;
   /** 覆盖图层数量上限 */
   maxCoverLayers: number;
+  /** 单批目标图数量上限 */
+  maxTargets: number;
+  /** 单张图像像素上限 */
+  maxPixels: number;
   params: SavedParams;
 }
 
@@ -70,6 +93,7 @@ const SETTINGS_KEY = 'imgvaguer.settings.v1';
 const defaultParams: SavedParams = {
   protection: 'password',
   pack: false,
+  layout: 'payload',
   iterations: 200000,
   blockSize: 16,
   noise: 16,
@@ -82,6 +106,23 @@ const defaultParams: SavedParams = {
   rowshift: true,
 };
 
+/** 合并张数上限区间：上限 12 兼顾输出体积与内存 */
+export const TARGET_MIN = 1;
+export const TARGET_MAX = 12;
+/** 覆盖图层数上限区间 */
+export const COVER_MIN = 1;
+export const COVER_MAX = 6;
+
+/** 收敛到可选区间（旧版本可能留下越界值） */
+export function clampTargets(n: number): number {
+  return Math.min(Math.max(Math.round(n), TARGET_MIN), TARGET_MAX);
+}
+
+/** 同上，用于覆盖图层数 */
+export function clampCovers(n: number): number {
+  return Math.min(Math.max(Math.round(n), COVER_MIN), COVER_MAX);
+}
+
 function loadSettings(): Settings {
   const fallback: Settings = {
     rememberParams: true,
@@ -89,6 +130,8 @@ function loadSettings(): Settings {
     defaultCover: null,
     defaultCoverMaxMB: 1.5,
     maxCoverLayers: 4,
+    maxTargets: 9,
+    maxPixels: 20_000_000,
     params: { ...defaultParams },
   };
   try {
@@ -100,7 +143,9 @@ function loadSettings(): Settings {
       defaultPassword: s.defaultPassword ?? '',
       defaultCover: s.defaultCover ?? null,
       defaultCoverMaxMB: s.defaultCoverMaxMB ?? 1.5,
-      maxCoverLayers: s.maxCoverLayers ?? 4,
+      maxCoverLayers: clampCovers(s.maxCoverLayers ?? 4),
+      maxTargets: clampTargets(s.maxTargets ?? 9),
+      maxPixels: s.maxPixels ?? 20_000_000,
       params: { ...defaultParams, ...(s.params ?? {}) },
     };
   } catch {
@@ -115,9 +160,10 @@ export const store = reactive({
   op: 'encrypt' as 'encrypt' | 'decrypt',
   mode: 'scramble' as Mode,
   protection: 'password' as Protection,
-  /** 多图合并（仅密钥文件保护下生效） */
+  /** 多图合并：把本批全部目标图并入一张输出 */
   pack: false,
   password: '',
+  layout: 'payload' as ScrambleLayout,
   iterations: 200000,
   blockSize: 16 as 8 | 16 | 32,
   noise: 16,
@@ -133,7 +179,7 @@ export const store = reactive({
 
   targets: [] as TargetItem[],
   /** 覆盖图层，按下层→上层排列 */
-  covers: [] as TargetItem[],
+  covers: [] as CoverItem[],
   /** 目标图所在层：位于其下方的覆盖图数量 */
   targetLayer: 0,
   /** 解密用密钥文件 */
@@ -154,6 +200,7 @@ if (settings.rememberParams) {
   Object.assign(store, {
     protection: p.protection,
     pack: p.pack,
+    layout: p.layout,
     iterations: p.iterations,
     blockSize: p.blockSize,
     noise: p.noise,
@@ -182,6 +229,7 @@ export function saveSettings(): void {
   settings.params = {
     protection: store.protection,
     pack: store.pack,
+    layout: store.layout,
     iterations: store.iterations,
     blockSize: store.blockSize,
     noise: store.noise,
@@ -205,6 +253,7 @@ watch(
   () => [
     store.protection,
     store.pack,
+    store.layout,
     store.iterations,
     store.blockSize,
     store.noise,

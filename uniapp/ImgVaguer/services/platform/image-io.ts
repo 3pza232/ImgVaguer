@@ -1,9 +1,11 @@
 /**
  * 图像 IO（平台适配）：选图、解码、预览源、文件读写。
  *
+ * 选图阶段只探测尺寸，位图推迟到真正需要时再解码（probeImage / decodeRaster）。
  * 解码：格式由 uni.getImageInfo 的 type 判定——PNG 走自研无损解码器（逐位精确），
  * 其余走平台画布；避免为嗅探格式而把整个（可能很大的）非 PNG 文件读成字节。
- * 预览源：H5 / App 用 data URL；小程序写用户目录并返回路径。放大预览走应用内浮层。
+ * 预览：选图得到的图像直接以原路径为显示源，不再为预览解码编码一遍；
+ * 解码结果按平台给出显示通道，放大预览走应用内浮层。
  */
 import { fromBase64 } from '@/core/base64';
 // toBase64 仅非小程序预览源使用（小程序写临时文件后返回路径）
@@ -12,32 +14,43 @@ import { toBase64 } from '@/core/base64';
 // #endif
 import { pickImageName, type ImageFormat } from '@/core/image-format';
 import { decodePngRgba, encodePng, isPng } from '@/core/png';
-import { thumbRaster } from '@/core/resize';
 import type { Raster } from '@/core/types';
+// #ifdef APP-PLUS
+import { writePrivateFileUrl } from './app-storage';
+// #endif
 // #ifndef H5
 import { resizeCanvas } from './canvas-box';
 // #endif
 
 // #ifndef H5
-/** 解码画布上限：边长与总像素（容纳常见手机照片，超出则内存/耗时不可控） */
-const CANVAS_MAX_EDGE = 8192;
+/** 画布解码的总像素上限：容纳常见手机照片，超出则内存/耗时不可控 */
 const CANVAS_MAX_PIXELS = 20_000_000;
+
+/**
+ * 画布单块尺寸。
+ *
+ * 原生画布（App / 小程序）的绘图区不能超过屏幕：超出部分的绘制直接丢失，
+ * 读回只剩左上角一块。故整幅解码必须按屏幕分块，且尺寸只设定一次、全程复用——
+ * 逐块重建原生画布会让绘制落在旧绘图区上，同样只解出左上角。
+ */
+function canvasTile(): { width: number; height: number } {
+  const info = uni.getSystemInfoSync();
+  return {
+    width: Math.max(1, Math.floor(info.windowWidth)),
+    height: Math.max(1, Math.floor(info.windowHeight)),
+  };
+}
 // #endif
 
-export interface LoadedImage {
+/** 结果图预览边长：完整像素留在结果字节里，此处只取够看的尺寸 */
+export const PREVIEW_EDGE = 1280;
+
+export interface ProbedImage {
   name: string;
   path: string;
-  raster: Raster;
-  /** 列表/图层条用的小缩略图 */
-  thumb: string;
-  /** 堆叠预览与放大用的大预览 */
-  preview: string;
+  width: number;
+  height: number;
 }
-
-/** 缩略图边长（列表） */
-const THUMB_EDGE = 256;
-/** 预览图边长（堆叠预览与放大：覆盖 1080p 屏） */
-const PREVIEW_EDGE = 1280;
 
 export interface PickedFile {
   path: string;
@@ -49,7 +62,7 @@ export interface PickedFile {
 /**
  * 选图（含文件大小，供大小上限校验使用）。
  * 原始文件名各端能力不一：H5 由选择器给出 name，App/小程序仅返回临时路径，
- * 故 name 可能缺省，由 loadImage 的兜底命名补足。
+ * 故 name 可能缺省，由 probeImage 的兜底命名补足。
  */
 export function chooseImagesWithMeta(count = 9): Promise<PickedFile[]> {
   return new Promise((resolve) => {
@@ -223,29 +236,44 @@ async function decodeByCanvas(path: string, size: { width: number; height: numbe
 
 // #ifndef H5
 /**
- * 旧版 canvas 解码：先把页面隐藏画布调整到图像尺寸，再绘制并读取像素。
- * createCanvasContext / canvasGetImageData 在 App 与小程序均受支持。
+ * 画布解码（非 PNG 回退）：按屏幕尺寸分块绘制后拼回整幅。
+ * 整幅一次绘制时，超出画布绘图区的部分会被丢掉，结果就是只解出左上角一块。
  */
 async function decodeByCanvas(path: string, size: { width: number; height: number }): Promise<Raster> {
-  if (size.width > CANVAS_MAX_EDGE || size.height > CANVAS_MAX_EDGE || size.width * size.height > CANVAS_MAX_PIXELS) {
-    throw new Error('非 PNG 图像过大，请先在相册裁剪压缩，或改用 PNG / 桌面端处理');
+  const { width, height } = size;
+  if (width * height > CANVAS_MAX_PIXELS) {
+    throw new Error(`非 PNG 图像过大（${width}x${height}），请先在相册裁剪压缩，或改用 PNG / 桌面端处理`);
   }
-  await resizeCanvas(size.width, size.height);
+  // 画布尺寸只设定一次并全程复用，之后每块都是一次独立绘制
+  const box = canvasTile();
+  await resizeCanvas(Math.min(box.width, width), Math.min(box.height, height));
   const ctx = uni.createCanvasContext('vg-canvas');
-  ctx.drawImage(path, 0, 0, size.width, size.height);
-  await new Promise<void>((resolve) => ctx.draw(false, () => resolve()));
-  const data = await new Promise<Uint8ClampedArray>((resolve, reject) => {
-    uni.canvasGetImageData({
-      canvasId: 'vg-canvas',
-      x: 0,
-      y: 0,
-      width: size.width,
-      height: size.height,
-      success: (res: { data: Uint8ClampedArray }) => resolve(new Uint8ClampedArray(res.data)),
-      fail: (e: { errMsg?: string }) => reject(new Error(e.errMsg ?? '读取像素失败')),
-    });
-  });
-  return { width: size.width, height: size.height, data };
+  const out = new Uint8ClampedArray(width * height * 4);
+  for (let ty = 0; ty < height; ty += box.height) {
+    const th = Math.min(box.height, height - ty);
+    for (let tx = 0; tx < width; tx += box.width) {
+      const tw = Math.min(box.width, width - tx);
+      // draw() 默认清空画布，故每块都是一次独立绘制
+      ctx.drawImage(path, tx, ty, tw, th, 0, 0, tw, th);
+      await new Promise<void>((resolve) => ctx.draw(false, () => resolve()));
+      const tile = await new Promise<Uint8ClampedArray>((resolve, reject) => {
+        uni.canvasGetImageData({
+          canvasId: 'vg-canvas',
+          x: 0,
+          y: 0,
+          width: tw,
+          height: th,
+          success: (res: { data: Uint8ClampedArray }) => resolve(new Uint8ClampedArray(res.data)),
+          fail: (e: { errMsg?: string }) => reject(new Error(e.errMsg ?? '读取像素失败')),
+        });
+      });
+      for (let y = 0; y < th; y++) {
+        const from = y * tw * 4;
+        out.set(tile.subarray(from, from + tw * 4), ((ty + y) * width + tx) * 4);
+      }
+    }
+  }
+  return { width, height, data: out };
 }
 // #endif
 
@@ -266,19 +294,19 @@ async function decodePath(
 }
 
 /**
- * 载入图像。命名优先级：选择器给出的原始名 → 路径基名（带图像扩展名）→ 兜底名。
- * 注意：各端临时路径普遍不含原始文件名，兜底名用于保证列表与导出不重名。
+ * 探测图像：只取尺寸与命名，不做像素解码。
+ * 命名优先级：选择器给出的原始名 → 路径基名（带图像扩展名）→ 兜底名
+ * （各端临时路径普遍不含原始文件名，兜底名用于保证列表与导出不重名）。
+ * 载荷布局与多图合并只需要尺寸，选图阶段不解码可让批量大图的内存与耗时都可忽略。
  */
-export async function loadImage(path: string, name?: string): Promise<LoadedImage> {
+export async function probeImage(path: string, name?: string): Promise<ProbedImage> {
   const info = await imageInfo(path);
-  const { raster, format } = await decodePath(path, info);
-  return {
-    name: pickImageName(name, path, format),
-    path,
-    raster,
-    thumb: await rasterToSrc(thumbRaster(raster, THUMB_EDGE)),
-    preview: await rasterToSrc(thumbRaster(raster, PREVIEW_EDGE)),
-  };
+  return { name: pickImageName(name, path, info.format), path, width: info.width, height: info.height };
+}
+
+/** 按需解码位图：像素级布局 / 覆盖合成 / 默认混淆图使用 */
+export async function decodeRaster(path: string): Promise<Raster> {
+  return (await decodePath(path, await imageInfo(path))).raster;
 }
 
 /**
@@ -294,6 +322,33 @@ export async function rasterToSrc(raster: Raster): Promise<string> {
   // #endif
   // #ifndef MP-WEIXIN
   return `data:image/png;base64,${toBase64(bytes)}`;
+  // #endif
+}
+
+// #ifndef H5
+/** 预览文件名：唯一且保留原扩展名（App 与小程序的 <image> 依赖扩展名渲染） */
+function previewName(name: string): string {
+  const ext = (name.match(/\.(\w+)$/)?.[1] ?? 'png').toLowerCase();
+  return `vg-restored-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
+}
+// #endif
+
+/**
+ * 还原结果 → 可显示的预览源。
+ * 载荷级布局下还原的是**原始文件**（可能是 jpg / png / webp 等任意格式），
+ * 无法再由位图重新编码，故按平台给出显示通道：H5 用 Blob URL，
+ * App 写入应用私有目录、小程序写入用户目录后返回本地路径。
+ */
+export async function bytesToSrc(bytes: Uint8Array, name: string): Promise<string> {
+  // #ifdef H5
+  void name;
+  return URL.createObjectURL(new Blob([bytes as unknown as BlobPart]));
+  // #endif
+  // #ifdef APP-PLUS
+  return writePrivateFileUrl(previewName(name), bytes);
+  // #endif
+  // #ifdef MP-WEIXIN
+  return writeTempFile(bytes, previewName(name));
   // #endif
 }
 

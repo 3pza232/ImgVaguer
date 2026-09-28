@@ -5,9 +5,7 @@ import { computed, ref } from 'vue';
 
 const open = ref(false);
 
-const errCount = computed(
-  () => store.logs.filter((l) => l.level === 'info' && (l.text.includes('失败') || l.text.includes('错误'))).length,
-);
+const errCount = computed(() => store.logs.filter((l) => l.level === 'info' && isErr(l.text)).length);
 
 const lines = computed(() =>
   store.logView === 'brief' ? store.logs.filter((l) => l.level === 'info') : store.logs,
@@ -16,6 +14,11 @@ const lines = computed(() =>
 /** 日志区高度策略：行数未超上限随内容自适应，超出后固定高度并在区内滚动 */
 const LOG_ROW_H = 60;
 const LOG_MAX_H = 420;
+
+/** 报错行：只在错误条目上标红（时间戳保持常规色） */
+function isErr(text: string): boolean {
+  return text.includes('失败') || text.includes('错误');
+}
 
 const linesStyle = computed(() =>
   lines.value.length * LOG_ROW_H > LOG_MAX_H ? { height: `${LOG_MAX_H}rpx` } : {},
@@ -50,7 +53,7 @@ function toggle(): void {
         :scroll-top="lines.length * 200"
         :scroll-with-animation="true"
       >
-        <view v-for="(l, i) in lines" :key="i" class="line" :class="{ dim: l.level === 'detail' }">
+        <view v-for="(l, i) in lines" :key="i" class="line" :class="{ dim: l.level === 'detail', err: l.level === 'info' && isErr(l.text) }">
           <text>{{ l.time }} {{ l.text }}</text>
         </view>
         <view v-if="!lines.length" class="line dim"><text>-- 暂无记录 --</text></view>
@@ -112,12 +115,18 @@ function toggle(): void {
 .lines {
   width: 100%;
 }
+/* 长条目必须换行显示：竖向 scroll-view 内默认不换行，会被截断在一行内 */
 .line {
   font-size: 22rpx;
   color: var(--fg);
   padding: 4rpx 0;
+  white-space: normal;
+  word-break: break-all;
 }
 .line.dim {
   color: var(--dim);
+}
+.line.err {
+  color: var(--err);
 }
 </style>
