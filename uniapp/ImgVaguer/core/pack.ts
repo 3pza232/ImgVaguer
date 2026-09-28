@@ -5,7 +5,10 @@
  *   每项: nameLen(2 LE) | name(UTF-8) | dataLen(4 LE) | data（原始文件字节）
  *
  * 单图与多图共用同一容器：单图即 count = 1，读取端无需分支。
+ * 文件名用自带的 UTF-8 编解码，不依赖 TextEncoder / TextDecoder——
+ * 容器层为两端同源代码，而 App（5+）与部分小程序 runtime 不提供这两个全局。
  */
+import { utf8Decode, utf8Encode } from './text';
 import type { Raster } from './types';
 
 const MAGIC = Uint8Array.from([0x49, 0x56, 0x50, 0x4b]); // "IVPK"
@@ -33,14 +36,13 @@ function concat(parts: Uint8Array[]): Uint8Array {
 
 export function packFiles(files: RawFile[]): Uint8Array {
   if (!files.length) throw new Error('没有可打包的文件');
-  const enc = new TextEncoder();
   const head = new Uint8Array(8);
   head.set(MAGIC, 0);
   new DataView(head.buffer).setUint32(4, files.length, true);
 
   const parts: Uint8Array[] = [head];
   for (const f of files) {
-    const nb = enc.encode(f.name);
+    const nb = utf8Encode(f.name);
     const meta = new Uint8Array(2 + nb.length + 4);
     const dv = new DataView(meta.buffer);
     dv.setUint16(0, nb.length, true);
@@ -56,7 +58,6 @@ export function unpackImages(bytes: Uint8Array): DecodedImage[] {
   for (let i = 0; i < 4; i++) if (bytes[i] !== MAGIC[i]) throw new Error('文件容器标识非法');
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const count = dv.getUint32(4, true);
-  const dec = new TextDecoder();
   const out: DecodedImage[] = [];
   let o = 8;
 
@@ -64,7 +65,7 @@ export function unpackImages(bytes: Uint8Array): DecodedImage[] {
     if (o + 2 > bytes.length) throw new Error('文件容器被截断');
     const nameLen = dv.getUint16(o, true); o += 2;
     if (o + nameLen > bytes.length) throw new Error('文件容器被截断');
-    const name = dec.decode(bytes.subarray(o, o + nameLen)); o += nameLen;
+    const name = utf8Decode(bytes.subarray(o, o + nameLen)); o += nameLen;
     if (o + 4 > bytes.length) throw new Error('文件容器被截断');
     const len = dv.getUint32(o, true); o += 4;
     if (o + len > bytes.length) throw new Error('文件容器数据非法');
