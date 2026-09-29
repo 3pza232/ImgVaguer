@@ -20,7 +20,11 @@ import {
   buildMeta,
   buildPreamble,
   CHUNK_TYPE,
+  EMBEDDED_INFO,
   hasMetaMagic,
+  KEYFILE_INFO,
+  META_DOMAIN,
+  OVERLAY_DOMAIN,
   parseChunk,
   parseMeta,
   SALT_LEN,
@@ -49,7 +53,7 @@ import {
   type CompressionLevel,
 } from '@/core/png';
 import { scrambleImage, unscrambleImage, type BlockSize, type ScrambleOptions } from '@/core/scramble';
-import { addStages, stageTimesOf, type StageTimes } from '@/core/stats';
+import { addStages, stageTimesOf, type StageProgress, type StageTimes } from '@/core/stats';
 import type { ImgVaguerParams, Protection, Raster, ScrambleKnobs } from '@/core/types';
 import { unzlibSync, zlibSync } from 'fflate';
 
@@ -57,13 +61,6 @@ import { unzlibSync, zlibSync } from 'fflate';
 function now(): number {
   return Date.now();
 }
-
-/** 载荷与元数据的 nonce 域 */
-const OVERLAY_DOMAIN = 0;
-const META_DOMAIN = 200;
-/** 全熵凭据的 HKDF 域标签，按用途隔离（与移动端必须一致，否则跨端无法互解） */
-const KEYFILE_INFO = 'imgvaguer/v5/keyfile';
-const EMBEDDED_INFO = 'imgvaguer/v5/embedded';
 
 const BLOCK_SIZES: readonly number[] = [8, 16, 32];
 const MIN_ITERATIONS = 1;
@@ -322,8 +319,10 @@ async function assemble(
   session: Session,
   pack: boolean,
   trace?: Trace,
+  progress?: StageProgress,
 ): Promise<Assembled> {
   const { width, height } = sources[0];
+  progress?.('payload');
   const tPayload = now();
   const payload = await sealFiles(sources, session.keys, session.iv);
   const common = {
@@ -342,12 +341,14 @@ async function assemble(
     const p1 = params.blockSize;
     const p2 = params.noise;
     if (params.layout === 'payload') {
+      progress?.('pixels');
       const t = now();
       const outRaster = decoyRaster(width, height, common.payload.length, session.keys.noise, session.iv);
       trace?.(`[cipher] ${label} 可见图=装饰噪声 ${outRaster.width}x${outRaster.height} 载荷=原始文件 ${(common.payload.length / 1024).toFixed(0)}KB`);
       return { ...common, p1, p2, outRaster, timings: { ...common.timings, pixels: now() - t } };
     }
     trace?.(`[cipher] ${label} 可见图=像素密文 x${o.rounds} @block${params.blockSize}: ${describePipeline(params.noise, o)}`);
+    progress?.('pixels');
     const t = now();
     const visible = scrambleImage(await sources[0].raster(), session.keys, params.blockSize, params.noise, session.iv, o);
     const pixels = now() - t;
@@ -373,6 +374,7 @@ async function assemble(
     }
   }
 
+  progress?.('pixels');
   const t = now();
   const target = await sources[0].raster();
   // 混合方式先做像素级密文混淆，再把覆盖层叠上去：覆盖层是门面，底下的像素已是噪声
@@ -419,6 +421,7 @@ async function finish(
  * 单图加密。
  * @param covers 覆盖图层（已缩放至目标尺寸），按叠放顺序排列
  * @param extSeed keyfile 模式下由调用方生成的 32B 密钥种子
+ * @param progress 阶段回调：每段开始时上报一次，供界面显示进度
  */
 export async function encryptImage(
   source: EncryptInput,
@@ -426,12 +429,15 @@ export async function encryptImage(
   covers: Raster[] = [],
   extSeed?: Uint8Array,
   trace?: Trace,
+  progress?: StageProgress,
 ): Promise<EncryptOutput> {
   validateIterations(params.iterations);
+  progress?.('kdf');
   const tKdf = now();
   const session = await openSession(params.protection, params.password, params.iterations, extSeed, trace);
   const kdf = now() - tKdf;
-  const assembled = await assemble([source], params, covers, session, false, trace);
+  const assembled = await assemble([source], params, covers, session, false, trace, progress);
+  progress?.('output');
   const tOut = now();
   const out = await finish(session, assembled, params, false, source, trace);
   return withTimings(out, kdf, now() - tOut);
@@ -453,14 +459,17 @@ export async function encryptPack(
   covers: Raster[] = [],
   extSeed?: Uint8Array,
   trace?: Trace,
+  progress?: StageProgress,
 ): Promise<EncryptOutput> {
   if (!sources.length) throw new Error('需要至少一张目标图');
   validateIterations(params.iterations);
+  progress?.('kdf');
   const tKdf = now();
   const session = await openSession(params.protection, params.password, params.iterations, extSeed, trace);
   const kdf = now() - tKdf;
   trace?.(`[pack] ${sources.map((s) => s.name).join(', ')}`);
-  const assembled = await assemble(sources, params, covers, session, true, trace);
+  const assembled = await assemble(sources, params, covers, session, true, trace, progress);
+  progress?.('output');
   const tOut = now();
   const out = await finish(session, assembled, params, true, sources[0], trace);
   return withTimings(out, kdf, now() - tOut);
@@ -484,6 +493,7 @@ export async function decryptImages(
   password?: string,
   keySeed?: Uint8Array,
   trace?: Trace,
+  progress?: StageProgress,
 ): Promise<DecryptOutput> {
   const chunk = extractPngChunk(bytes, CHUNK_TYPE);
   if (!chunk) throw new Error('未找到 ImgVaguer 数据块，非本工具生成');
@@ -498,6 +508,7 @@ export async function decryptImages(
   let pixelsMs = 0;
   const pixels = (): Raster => {
     if (!raster) {
+      progress?.('pixels');
       const t = now();
       raster = decodePngRgba(bytes);
       pixelsMs += now() - t;
@@ -514,6 +525,7 @@ export async function decryptImages(
 
   let keys: SubKeys | null = null;
   let meta: Uint8Array | null = null;
+  progress?.('kdf');
   const tKdf = now();
   for (const { kind, secret } of labeled) {
     const master = await deriveMaster(kind, secret, c.salt, c.iterations);
@@ -548,6 +560,7 @@ export async function decryptImages(
 
   // 位图载荷：单图、多图合并、覆盖合成、混合方式的载荷都是原始文件字节（单图即 count = 1）
   if (fields.payloadKind === 'file') {
+    progress?.('payload');
     const t = now();
     const files = unpackImages(openPayload(payload, keys, iv));
     const payloadMs = now() - t;

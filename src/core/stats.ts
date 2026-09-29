@@ -35,6 +35,23 @@ export const STAGE_HINTS: Record<StageKey, string> = {
   output: '把结果编码成 PNG 并写入数据块，或把还原结果交回界面。',
 };
 
+/**
+ * 一次运行中的进度：按张推进，并显示当前这张正处在哪一段。
+ * 段名直接复用上面的四段，界面上因此不会出现第二套说法。
+ */
+export interface RunProgress {
+  /** 当前在做什么：如「加密 a.png」「载入图像…」 */
+  label: string;
+  /** 已完成张数 */
+  done: number;
+  total: number;
+  /** 当前阶段；不在处理图像时（如准备阶段）为 null */
+  stage: StageKey | null;
+}
+
+/** 阶段进度回调：引擎在每段开始时上报一次，界面据此更新 RunProgress.stage */
+export type StageProgress = (stage: StageKey) => void;
+
 /** 单张图像的处理记录 */
 export interface ItemStat {
   name: string;
@@ -101,6 +118,26 @@ export function emptyStats(op: 'encrypt' | 'decrypt', mode: Mode | null): BatchS
 export function withOutputStage(ms: number, stages: StageTimes): StageTimes {
   const rest = ms - stages.kdf - stages.payload - stages.pixels;
   return { ...stages, output: rest > 0 ? rest : 0 };
+}
+
+/**
+ * 记账：成功一项。
+ * 「四段必须等于总耗时」这条规则只在 withOutputStage 里实现一次，
+ * 两端都走这里入账，就不会出现一边算了输出段、另一边忘了的情况。
+ */
+export function recordOk(
+  stats: BatchStats,
+  o: { name: string; inBytes: number; outBytes: number; ms: number; pixels: number; timings: StageTimes },
+): void {
+  stats.items.push(itemStat({ ...o, stages: withOutputStage(o.ms, o.timings) }));
+}
+
+/** 记账：失败一项（只有总耗时，分段留空） */
+export function recordFail(
+  stats: BatchStats,
+  o: { name: string; inBytes: number; ms: number; pixels: number },
+): void {
+  stats.items.push(itemStat({ ...o, ok: false }));
 }
 
 /** 登记一张的台账（未提供分段时记为全 0，用于失败项） */

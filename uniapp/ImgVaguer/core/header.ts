@@ -19,6 +19,23 @@ import type { Mode, Protection } from './types';
 export const CHUNK_TYPE = 'inVa';
 /** 线格式版本：仅本版本可读（不保留历史格式兼容） */
 export const VERSION = 5;
+
+/**
+ * 全熵凭据的 HKDF 域标签：把同一个种子按用途隔离成不同的主密钥。
+ *
+ * 这两个字符串直接决定密钥本身，属于线格式的一部分——桌面端与移动端必须一致，
+ * 否则同一种子加密的图像互相解不开。它们曾各自写在各端的编排层里，因而漂移过；
+ * 现在统一放在这里，随共用文件逐步校验，改版本号时一并改。
+ */
+export const KEYFILE_INFO = 'imgvaguer/v5/keyfile';
+export const EMBEDDED_INFO = 'imgvaguer/v5/embedded';
+
+/**
+ * 载荷与元数据的 nonce 域：同一个 salt 之下把不同用途的密钥流彼此隔开。
+ * 与域标签同理，它们决定密文本身，属于线格式的一部分，两端必须一致。
+ */
+export const OVERLAY_DOMAIN = 0;
+export const META_DOMAIN = 200;
 export const HMAC_LEN = 32;
 
 export const SALT_LEN = 16;

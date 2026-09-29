@@ -4,6 +4,7 @@
  * 布局顺序 = 拇指可达顺序：操作页签 → 预览 → 选图 → 方式/保护/参数 → 结果日志 → 底部执行。
  */
 import { APP_AUTHOR, APP_VERSION } from '@/app-meta';
+import { STAGE_LABELS } from '@/core/stats';
 import CollapseSection from '@/components/CollapseSection.vue';
 import ImageZoom from '@/components/ImageZoom.vue';
 import LogDrawer from '@/components/LogDrawer.vue';
@@ -214,7 +215,13 @@ const showCovers = computed(() => store.op === 'encrypt' && store.mode !== 'scra
 const execLabel = computed(() => (store.op === 'encrypt' ? '[ 执行加密 ]' : '[ 执行解密 ]'));
 /** 执行中的按钮文案：只说明在做什么，细节留给日志 */
 const busyLabels: Record<BusyTask, string> = { encrypt: '加密中…', decrypt: '解密中…', export: '导出中…' };
-const busyLabel = computed(() => (store.busy ? busyLabels[store.busy] : ''));
+/** 执行中的按钮文案：带上第几张与当前阶段，长任务也有反馈 */
+const busyLabel = computed(() => {
+  if (!store.busy) return '';
+  const p = store.progress;
+  if (!p) return busyLabels[store.busy];
+  return `${busyLabels[store.busy]} ${p.done + 1}/${p.total}${p.stage ? ` · ${STAGE_LABELS[p.stage]}` : ''}`;
+});
 /** 高迭代提示阈值（纯 TS 派生路径下耗时明显） */
 const KDF_WARN = 1000000;
 

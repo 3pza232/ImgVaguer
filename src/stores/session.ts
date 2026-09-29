@@ -1,5 +1,5 @@
 /** 轻量响应式会话状态 + localStorage 设置持久化（不引入 Pinia，保持低依赖） */
-import type { BatchStats } from '@/core/stats';
+import type { BatchStats, RunProgress } from '@/core/stats';
 import type { Mode, Protection, Raster, ScrambleLayout } from '@/core/types';
 import { reactive, watch } from 'vue';
 
@@ -195,6 +195,8 @@ export const store = reactive({
   /** 终端视图：精简 / 详情 */
   logView: 'brief' as 'brief' | 'detail',
   busy: false,
+  /** 运行进度：按张推进并显示当前阶段；空闲为 null */
+  progress: null as RunProgress | null,
 });
 
 // 启动时应用持久化设置（保护方式随参数一并记忆；仅首次使用默认口令方式）

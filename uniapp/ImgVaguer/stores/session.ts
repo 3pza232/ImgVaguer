@@ -1,5 +1,5 @@
 /** 轻量响应式会话状态 + uni 存储持久化（结构对齐桌面版，去掉 DOM 专属字段） */
-import type { BatchStats } from '@/core/stats';
+import type { BatchStats, RunProgress } from '@/core/stats';
 import type { Mode, Protection, Raster, ScrambleLayout } from '@/core/types';
 // 仅类型引用（编译期擦除）：设置中的导出目录由平台层定义
 import type { ExportTree } from '@/services/platform/app-storage';
@@ -192,6 +192,8 @@ export const store = reactive({
   logs: [] as LogLine[],
   logView: 'brief' as 'brief' | 'detail',
   busy: null as BusyTask | null,
+  /** 运行进度：按张推进并显示当前阶段；空闲为 null */
+  progress: null as RunProgress | null,
 });
 
 if (settings.rememberParams) {

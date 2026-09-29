@@ -6,7 +6,8 @@ import { toBase64 } from '@/core/base64';
 import { generateKeyFile, parseKeyFile, randomKeySeed } from '@/core/keyfile';
 import { encodePng } from '@/core/png';
 import { fitRaster, degradeRaster, thumbRaster } from '@/core/resize';
-import { emptyStats, itemStat, withOutputStage } from '@/core/stats';
+import { buildParams } from '@/core/params';
+import { emptyStats, recordFail, recordOk, type StageProgress } from '@/core/stats';
 import type { ImgVaguerParams, Raster } from '@/core/types';
 import { detail, log, saveSettings, settings, store, type CoverItem, type KeyFileRef, type ResultBatch, type ResultItem, type TargetItem } from '@/stores/session';
 import { decryptImages, encryptImage, encryptPack, readHeader, type EncryptInput } from './engine';
@@ -38,32 +39,10 @@ import { readClipboard } from './platform/save';
 /** 相册选择器单次可选张数上限（各端一致） */
 const PICK_MAX = 9;
 
-/** 混淆参数：按当前方式取用对应旋钮（混合方式两者都要） */
-function buildParams(): ImgVaguerParams {
-  const base = {
-    protection: store.protection,
-    password: store.password,
-    iterations: store.iterations,
-    pack: store.pack,
-  };
-  const scramble = {
-    blockSize: store.blockSize,
-    noise: store.noise,
-    rounds: store.rounds,
-    globalPerm: store.globalPerm,
-    sbox: store.sbox,
-    rowshift: store.rowshift,
-  };
-  const overlay = {
-    opacity: store.opacity,
-    fit: store.fit,
-    targetLayer: store.targetLayer,
-    coverQuality: store.coverQuality,
-  };
-  if (store.mode === 'overlay') return { ...base, mode: 'overlay', ...overlay };
-  if (store.mode === 'hybrid') return { ...base, mode: 'hybrid', ...scramble, ...overlay };
-  return { ...base, mode: 'scramble', layout: store.layout, ...scramble };
-}
+/** 阶段进度回调：只替换当前阶段，张数与名称保持不变 */
+const reportStage: StageProgress = (stage) => {
+  if (store.progress) store.progress.stage = stage;
+};
 
 function suffixed(name: string, suffix: string): string {
   return name.replace(/\.\w+$/, '') + suffix;
@@ -349,7 +328,7 @@ export async function runEncrypt(): Promise<void> {
   store.busy = 'encrypt';
   try {
     await ensureRandomReady();
-    const params = buildParams();
+    const params = buildParams(store);
     const extSeed = store.protection === 'keyfile' ? randomKeySeed() : undefined;
     const keyFile: KeyFileRef | null = extSeed
       ? { name: 'imgvaguer-key.ivkey', text: await generateKeyFile(extSeed) }
@@ -368,11 +347,12 @@ export async function runEncrypt(): Promise<void> {
     if (pack) {
       const inBytes = totalSourceBytes();
       const pixels = store.targets.reduce((n, t) => n + t.width * t.height, 0);
+      store.progress = { label: `合并加密 ${store.targets.length} 张`, done: 0, total: 1, stage: null };
       const t0 = Date.now();
       try {
         const first = store.targets[0];
         const sources = store.targets.map(inputOf);
-        const out = await encryptPack(sources, params, await buildCovers(params, first.width, first.height), extSeed, detail);
+        const out = await encryptPack(sources, params, await buildCovers(params, first.width, first.height), extSeed, detail, reportStage);
         const ms = Date.now() - t0;
         okCount = 1;
         batch.items.push({
@@ -381,28 +361,29 @@ export async function runEncrypt(): Promise<void> {
           preview: await previewOf(out.outRaster),
           ok: true,
         });
-        stats.items.push(
-          itemStat({
-            name: `合并 ${store.targets.length} 张`,
-            inBytes,
-            outBytes: out.bytes.length,
-            ms,
-            pixels,
-            stages: withOutputStage(ms, out.timings),
-          }),
-        );
+        recordOk(stats, {
+          name: `合并 ${store.targets.length} 张`,
+          inBytes,
+          outBytes: out.bytes.length,
+          ms,
+          pixels,
+          timings: out.timings,
+        });
         log(`合并加密 ${store.targets.length} 张 -> ${(out.bytes.length / 1024).toFixed(1)}KB (${ms}ms)`);
       } catch (e) {
-        stats.items.push(itemStat({ name: `合并 ${store.targets.length} 张`, inBytes, ms: Date.now() - t0, pixels, ok: false }));
+        recordFail(stats, { name: `合并 ${store.targets.length} 张`, inBytes, ms: Date.now() - t0, pixels });
         batch.items.push({ name: store.targets[0].name, bytes: null, preview: '', ok: false, error: (e as Error).message });
         log(`合并加密失败: ${(e as Error).message}`);
       }
     } else {
-      for (const t of store.targets) {
+      const total = store.targets.length;
+      for (let i = 0; i < total; i++) {
+        const t = store.targets[i];
+        store.progress = { label: `加密 ${t.name}`, done: i, total, stage: null };
         await yieldToUI();
         const t0 = Date.now();
         try {
-          const out = await encryptImage(inputOf(t), params, await buildCovers(params, t.width, t.height), extSeed, detail);
+          const out = await encryptImage(inputOf(t), params, await buildCovers(params, t.width, t.height), extSeed, detail, reportStage);
           const ms = Date.now() - t0;
           okCount++;
           batch.items.push({
@@ -411,19 +392,17 @@ export async function runEncrypt(): Promise<void> {
             preview: await previewOf(out.outRaster),
             ok: true,
           });
-          stats.items.push(
-            itemStat({
-              name: t.name,
-              inBytes: t.size,
-              outBytes: out.bytes.length,
-              ms,
-              pixels: t.width * t.height,
-              stages: withOutputStage(ms, out.timings),
-            }),
-          );
+          recordOk(stats, {
+            name: t.name,
+            inBytes: t.size,
+            outBytes: out.bytes.length,
+            ms,
+            pixels: t.width * t.height,
+            timings: out.timings,
+          });
           log(`加密 ${t.name} -> ${(out.bytes.length / 1024).toFixed(1)}KB (${ms}ms)`);
         } catch (e) {
-          stats.items.push(itemStat({ name: t.name, inBytes: t.size, ms: Date.now() - t0, pixels: t.width * t.height, ok: false }));
+          recordFail(stats, { name: t.name, inBytes: t.size, ms: Date.now() - t0, pixels: t.width * t.height });
           batch.items.push({ name: t.name, bytes: null, preview: '', ok: false, error: (e as Error).message });
           log(`失败 ${t.name}: ${(e as Error).message}`);
         }
@@ -437,6 +416,7 @@ export async function runEncrypt(): Promise<void> {
     detail(`[batch] 加密完成 成功 ${okCount}/${store.targets.length} 项，总耗时 ${(stats.totalMs / 1000).toFixed(1)}s`);
   } finally {
     store.busy = null;
+    store.progress = null;
   }
 }
 
@@ -450,13 +430,16 @@ export async function runDecrypt(): Promise<void> {
     const stats = emptyStats('decrypt', null);
     log(`开始解密 ${store.targets.length} 项`);
     const batchT0 = Date.now();
-    for (const t of store.targets) {
+    const total = store.targets.length;
+    for (let i = 0; i < total; i++) {
+      const t = store.targets[i];
+      store.progress = { label: `还原 ${t.name}`, done: i, total, stage: null };
       const t0 = Date.now();
       try {
         await yieldToUI();
         const bytes = await readFileBytes(t.path);
         if (!readHeader(bytes)) throw new Error('非 ImgVaguer 图像（可能被二次压缩，请用原始输出文件）');
-        const { images, timings } = await decryptImages(bytes, store.password || undefined, store.keyFile?.seed, detail);
+        const { images, timings } = await decryptImages(bytes, store.password || undefined, store.keyFile?.seed, detail, reportStage);
         const multi = images.length > 1;
         let outBytes = 0;
         for (let i = 0; i < images.length; i++) {
@@ -474,19 +457,17 @@ export async function runDecrypt(): Promise<void> {
           outBytes += png.length;
         }
         const ms = Date.now() - t0;
-        stats.items.push(
-          itemStat({
-            name: t.name,
-            inBytes: t.size,
-            outBytes,
-            ms,
-            pixels: t.width * t.height,
-            stages: withOutputStage(ms, timings),
-          }),
-        );
+        recordOk(stats, {
+          name: t.name,
+          inBytes: t.size,
+          outBytes,
+          ms,
+          pixels: t.width * t.height,
+          timings,
+        });
         log(`还原 ${t.name}${multi ? ` -> ${images.length} 张` : ''} (${ms}ms)`);
       } catch (e) {
-        stats.items.push(itemStat({ name: t.name, inBytes: t.size, ms: Date.now() - t0, pixels: t.width * t.height, ok: false }));
+        recordFail(stats, { name: t.name, inBytes: t.size, ms: Date.now() - t0, pixels: t.width * t.height });
         batch.items.push({ name: t.name, bytes: null, preview: '', ok: false, error: (e as Error).message });
         log(`失败 ${t.name}: ${(e as Error).message}`);
       }
@@ -497,6 +478,7 @@ export async function runDecrypt(): Promise<void> {
     detail(`[batch] 解密完成 成功 ${ok}/${store.targets.length} 项，总耗时 ${(stats.totalMs / 1000).toFixed(1)}s`);
   } finally {
     store.busy = null;
+    store.progress = null;
   }
 }
 

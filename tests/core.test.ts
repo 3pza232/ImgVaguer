@@ -15,7 +15,19 @@ import {
 import { deriveMasterKey, deriveSubKeys, hkdfSha256, type SubKeys } from '@/core/kdf';
 import { generateKeyFile, KEY_MAGIC, parseKeyFile, randomKeySeed } from '@/core/keyfile';
 import { compositeLayers } from '@/core/overlay';
-import { composeSlices, formatBytes, formatMs, itemStat, shares, statRows, summarize } from '@/core/stats';
+import { buildParams } from '@/core/params';
+import {
+  composeSlices,
+  emptyStats,
+  formatBytes,
+  formatMs,
+  itemStat,
+  recordFail,
+  recordOk,
+  shares,
+  statRows,
+  summarize,
+} from '@/core/stats';
 import {
   decodePngRgba,
   encodePng,
@@ -430,12 +442,76 @@ describe('性能统计', () => {
     expect(statRows(stats, summary)[0].width).toBe(100);
   });
 
+  it('记账：成功项补上输出段，失败项只记总耗时', () => {
+    const stats = emptyStats('encrypt', 'scramble');
+    recordOk(stats, {
+      name: 'a.png',
+      inBytes: 10,
+      outBytes: 20,
+      ms: 100,
+      pixels: 4,
+      timings: { kdf: 10, payload: 30, pixels: 20, output: 0 },
+    });
+    recordFail(stats, { name: 'b.png', inBytes: 10, ms: 25, pixels: 4 });
+    // 输出段由总耗时减去前三段得到，四段恒等于总耗时
+    expect(stats.items[0].stages).toEqual({ kdf: 10, payload: 30, pixels: 20, output: 40 });
+    expect(stats.items[1].ok).toBe(false);
+    expect(stats.items[1].stages).toEqual({ kdf: 0, payload: 0, pixels: 0, output: 0 });
+  });
+
   it('字节与耗时格式化', () => {
     expect(formatBytes(512)).toBe('512 B');
     expect(formatBytes(2048)).toBe('2.0 KB');
     expect(formatMs(8)).toBe('8.0 ms');
     expect(formatMs(250)).toBe('250 ms');
     expect(formatMs(2500)).toBe('2.50 s');
+  });
+});
+
+describe('参数装配', () => {
+  const input = {
+    protection: 'none' as const,
+    password: '',
+    iterations: 1000,
+    pack: false,
+    mode: 'scramble' as const,
+    layout: 'payload' as const,
+    blockSize: 16 as const,
+    noise: 24,
+    rounds: 2,
+    globalPerm: true,
+    sbox: true,
+    rowshift: true,
+    opacity: 0.8,
+    fit: 'stretch' as const,
+    targetLayer: 1,
+    coverQuality: 0.5,
+  };
+
+  it('密文混淆：带像素旋钮与布局，不带图层旋钮', () => {
+    const p = buildParams(input);
+    if (p.mode !== 'scramble') throw new Error('模式应为密文混淆');
+    expect(p.layout).toBe('payload');
+    expect(p.blockSize).toBe(16);
+    expect(p.noise).toBe(24);
+    expect('opacity' in p).toBe(false);
+  });
+
+  it('覆盖合成：带图层旋钮，不带像素旋钮', () => {
+    const p = buildParams({ ...input, mode: 'overlay' });
+    if (p.mode !== 'overlay') throw new Error('模式应为覆盖合成');
+    expect(p.opacity).toBe(0.8);
+    expect(p.fit).toBe('stretch');
+    expect(p.targetLayer).toBe(1);
+    expect('blockSize' in p).toBe(false);
+  });
+
+  it('混合方式：两套旋钮都在', () => {
+    const p = buildParams({ ...input, mode: 'hybrid' });
+    if (p.mode !== 'hybrid') throw new Error('模式应为混合方式');
+    expect(p.blockSize).toBe(16);
+    expect(p.opacity).toBe(0.8);
+    expect(p.coverQuality).toBe(0.5);
   });
 });
 
@@ -701,6 +777,20 @@ describe('engine', () => {
     const out = await encryptPack(sources, scramble({ pack: true, layout: 'payload', protection: 'keyfile' }), [], seed);
     expect(out.outRaster.data).not.toEqual(first.data);
     await expectOriginal(await decryptImage(out.bytes, undefined, seed), sources);
+  });
+
+  it('阶段进度按顺序上报（界面据此显示当前阶段）', async () => {
+    const raster = opaqueRaster(8, 8);
+    const seen: string[] = [];
+    await encryptImage(
+      fileInput(raster, encodePng(raster)),
+      scramble({ layout: 'payload' }),
+      [],
+      undefined,
+      undefined,
+      (stage) => seen.push(stage),
+    );
+    expect(seen).toEqual(['kdf', 'payload', 'pixels', 'output']);
   });
 
   it('混合方式：可见图为密文底图叠覆盖层，还原仍为原始文件', async () => {

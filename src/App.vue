@@ -6,6 +6,7 @@ import ParamPanel from '@/components/ParamPanel.vue';
 import PreviewPane from '@/components/PreviewPane.vue';
 import SettingsPanel from '@/components/SettingsPanel.vue';
 import TaskLog from '@/components/TaskLog.vue';
+import { STAGE_LABELS } from '@/core/stats';
 import { addTargets, applyDefaultCover } from '@/services/actions';
 import { clearTargets, removeTarget, store } from '@/stores/session';
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
@@ -176,6 +177,10 @@ function closeDocs(): void {
 
     <footer class="statusbar">
       <span>状态: <b>{{ status }}</b></span>
+      <span v-if="store.progress">
+        进度: <b>{{ store.progress.done + 1 }}/{{ store.progress.total }}</b>
+        <template v-if="store.progress.stage"> · {{ STAGE_LABELS[store.progress.stage] }}</template>
+      </span>
       <span>模式: <b>{{ modeLabel }}</b></span>
       <span v-if="store.op === 'encrypt'">保护: <b>{{ protectionLabel }}</b></span>
       <span>目标: <b>{{ store.targets.length }}</b></span>

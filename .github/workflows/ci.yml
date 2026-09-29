@@ -1,0 +1,38 @@
+# 四道闸门：类型检查 · 单元测试（含两端同源与互操作） · 移动端三平台校验 · 构建。
+#
+# 这几条命令与本地跑的一致，CI 只是把它们固定下来：
+# 任何一次推送都会验证「桌面端可编译、两端仍同源、移动端三平台无错、能出包」。
+# 用 windows-latest 是因为移动端的校验脚本会生成临时工程调用 vue-tsc，
+# 与日常开发环境保持一致，避免平台差异带来的假失败。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    name: 四道闸门
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查（桌面端）
+        run: npm run typecheck
+
+      - name: 单元测试（含两端同源与互操作）
+        run: npm test
+
+      - name: 移动端三平台校验（含 core 宿主全局防线）
+        run: npm run check:uniapp
+
+      - name: 构建（H5 / 桌面产物）
+        run: npm run build
