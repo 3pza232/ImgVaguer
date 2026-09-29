@@ -1,9 +1,9 @@
 {
     "name" : "ImgVaguer",
     "appid" : "__UNI__B3A6D0B",
-    "description" : "图片加密混淆与还原工具（密文混淆 / 覆盖合成，本地处理，逐位无损还原）",
-    "versionName" : "0.3.0",
-    "versionCode" : 300,
+    "description" : "图片加密混淆与还原工具（密文混淆 / 覆盖合成 / 密文+覆盖，本地处理，逐位无损还原）",
+    "versionName" : "0.3.1",
+    "versionCode" : 301,
     "transformPx" : false,
     /* 5+App特有相关 */
     "app-plus" : {

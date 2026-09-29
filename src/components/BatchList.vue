@@ -1,10 +1,13 @@
 <script setup lang="ts">
+import StatsPanel from '@/components/StatsPanel.vue';
 import { downloadAll, downloadKeyFile, downloadOne } from '@/services/actions';
 import { removeBatch, stepBatch, store } from '@/stores/session';
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 
 const batch = computed(() => store.batches[store.batchIndex] ?? null);
 const okCount = computed(() => batch.value?.items.filter((r) => r.ok).length ?? 0);
+
+const showStats = ref(false);
 
 /** 字节数 → KB 文本 */
 const kb = (bytes: number): string => `${(bytes / 1024).toFixed(1)}KB`;
@@ -19,6 +22,9 @@ const kb = (bytes: number): string => `${(bytes / 1024).toFixed(1)}KB`;
       <button class="pg" title="下一批" :disabled="store.batches.length < 2" @click="stepBatch(1)">›</button>
       <span class="result-sep">|</span>
       <button class="del-x" title="删除本批结果" @click="removeBatch(store.batchIndex)">×</button>
+      <button v-if="batch.stats" class="stats-btn" title="本批耗时构成与逐张明细" @click="showStats = true">
+        [ 性能分析 ]
+      </button>
     </div>
 
     <div class="results">
@@ -42,4 +48,6 @@ const kb = (bytes: number): string => `${(bytes / 1024).toFixed(1)}KB`;
       </button>
     </div>
   </div>
+
+  <StatsPanel v-if="showStats" @close="showStats = false" />
 </template>

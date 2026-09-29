@@ -88,7 +88,8 @@ const status = computed(() => (store.busy ? '处理中…' : '就绪'));
 
 const modeLabel = computed(() => {
   if (store.op === 'decrypt') return '解密';
-  return store.mode === 'scramble' ? '加密·密文混淆' : '加密·覆盖合成';
+  if (store.mode === 'scramble') return '加密·密文混淆';
+  return store.mode === 'hybrid' ? '加密·密文+覆盖' : '加密·覆盖合成';
 });
 
 const protectionLabel = computed(

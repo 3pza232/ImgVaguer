@@ -1,4 +1,4 @@
-export type Mode = 'scramble' | 'overlay';
+export type Mode = 'scramble' | 'overlay' | 'hybrid';
 
 /** DOM 无关的位图结构，core 层统一使用 */
 export interface Raster {
@@ -26,9 +26,8 @@ interface BaseParams {
   pack?: boolean;
 }
 
-export interface ScrambleParams extends BaseParams {
-  mode: 'scramble';
-  layout: ScrambleLayout;
+/** 像素级密文变换的可调旋钮：密文混淆与混合方式共用 */
+export interface ScrambleKnobs {
   blockSize: 8 | 16 | 32;
   /** 可逆加性噪声幅度 0..64 */
   noise: number;
@@ -42,8 +41,8 @@ export interface ScrambleParams extends BaseParams {
   rowshift?: boolean;
 }
 
-export interface OverlayParams extends BaseParams {
-  mode: 'overlay';
+/** 覆盖合成的可调旋钮：覆盖合成与混合方式共用 */
+export interface OverlayKnobs {
   /** 覆盖不透明度 0..1 */
   opacity: number;
   fit: 'cover' | 'stretch';
@@ -53,4 +52,23 @@ export interface OverlayParams extends BaseParams {
   coverQuality?: number;
 }
 
-export type ImgVaguerParams = ScrambleParams | OverlayParams;
+export interface ScrambleParams extends BaseParams, ScrambleKnobs {
+  mode: 'scramble';
+  layout: ScrambleLayout;
+}
+
+export interface OverlayParams extends BaseParams, OverlayKnobs {
+  mode: 'overlay';
+}
+
+/**
+ * 混合方式：先对目标图做像素级密文混淆，再叠加覆盖图层。
+ * 可见结果是「密文底图 + 覆盖层」：覆盖层是第一眼看到的内容，
+ * 即便被褪除或调成半透明，露出的也是密文噪声而非原图。
+ * 原图仍以原始文件字节存入加密载荷，还原不依赖可见像素，故依然逐位无损。
+ */
+export interface HybridParams extends BaseParams, ScrambleKnobs, OverlayKnobs {
+  mode: 'hybrid';
+}
+
+export type ImgVaguerParams = ScrambleParams | OverlayParams | HybridParams;

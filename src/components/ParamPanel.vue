@@ -2,10 +2,16 @@
 import DropZone from '@/components/DropZone.vue';
 import { addCovers, run, setKeyFile } from '@/services/actions';
 import { clearCovers, clearKeyFile, moveCover, removeCover, store } from '@/stores/session';
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 
 const coverDrag = ref<number | null>(null);
 const coverDragOver = ref<number | null>(null);
+
+/**
+ * 图层条自上而下显示，L1 即顶层——与「目标图所在层」的自上而下编号一致。
+ * 每项带着存储下标 i，拖拽与删除仍按存储序（下层在前）操作，只有显示顺序是反的。
+ */
+const coversTopFirst = computed(() => store.covers.map((c, i) => ({ c, i })).reverse());
 
 function onCoverDrop(i: number): void {
   if (coverDrag.value !== null && coverDrag.value !== i) moveCover(coverDrag.value, i);
@@ -25,13 +31,19 @@ function onCoverDrop(i: number): void {
         <div class="tab" :class="{ active: store.mode === 'overlay' }" @click="store.mode = 'overlay'">
           覆盖合成
         </div>
+        <div class="tab" :class="{ active: store.mode === 'hybrid' }" @click="store.mode = 'hybrid'">
+          密文+覆盖
+        </div>
       </div>
-      <div v-if="store.mode === 'overlay'" style="margin-bottom: 10px">
+      <div v-if="store.mode === 'hybrid'" class="hint" style="margin-bottom: 9px">
+        先做密文混淆，再叠加混淆图层：看到的是图层，图层之下是密文噪声。
+      </div>
+      <div v-if="store.mode !== 'scramble'" style="margin-bottom: 10px">
         <div class="panel-title">─ 混淆图层</div>
         <DropZone label="混淆图像" hint="拖入 / 点击追加图层" multiple @files="addCovers" />
         <div v-if="store.covers.length" class="file-list">
           <div
-            v-for="(c, i) in store.covers"
+            v-for="({ c, i }, d) in coversTopFirst"
             :key="c.name + i"
             class="item draggable"
             :class="{ 'drag-over': coverDragOver === i && coverDrag !== i }"
@@ -44,7 +56,7 @@ function onCoverDrop(i: number): void {
             @drop.prevent="onCoverDrop(i)"
           >
             <span class="grip" title="拖动调整层序">≡</span>
-            <span class="dims">L{{ i + 1 }}</span>
+            <span class="dims" title="L1 在最上层">L{{ d + 1 }}</span>
             <span class="fname" :title="c.name">{{ c.name }}</span>
             <button class="link del" title="移除" @click="removeCover(i)">×</button>
           </div>
@@ -99,39 +111,42 @@ function onCoverDrop(i: number): void {
         <div v-if="store.layout === 'payload'" class="hint" style="margin-bottom: 9px">
           可见像素为块状噪声装饰图，原图经滤波压缩后加密存于数据块，体积约为像素级的 1/2。
         </div>
-        <template v-else>
-          <div class="row">
-            <label>分块尺寸</label>
-            <select v-model.number="store.blockSize">
-              <option :value="8">8 px（细粒度）</option>
-              <option :value="16">16 px（均衡）</option>
-              <option :value="32">32 px（粗粒度）</option>
-            </select>
-          </div>
-          <div class="row">
-            <label>噪声强度 <span class="val">{{ store.noise }}</span></label>
-            <input v-model.number="store.noise" type="range" min="0" max="64" step="1" />
-          </div>
-          <div class="row">
-            <label>变换轮数 <span class="val">{{ store.rounds }}</span></label>
-            <input v-model.number="store.rounds" type="range" min="1" max="4" step="1" />
-          </div>
-          <div class="row inline">
-            <input id="sbox" v-model="store.sbox" type="checkbox" />
-            <label for="sbox">S 盒字节替换</label>
-          </div>
-          <div class="row inline">
-            <input id="rowshift" v-model="store.rowshift" type="checkbox" />
-            <label for="rowshift">行列循环移位</label>
-          </div>
-          <div class="row inline">
-            <input id="gperm" v-model="store.globalPerm" type="checkbox" />
-            <label for="gperm">全局像素置换（大图较慢）</label>
-          </div>
-        </template>
       </template>
 
-      <template v-else>
+      <!-- 像素级密文变换：密文混淆与混合方式共用 -->
+      <template v-if="store.mode !== 'overlay'">
+        <div class="row">
+          <label>分块尺寸</label>
+          <select v-model.number="store.blockSize">
+            <option :value="8">8 px（细粒度）</option>
+            <option :value="16">16 px（均衡）</option>
+            <option :value="32">32 px（粗粒度）</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>噪声强度 <span class="val">{{ store.noise }}</span></label>
+          <input v-model.number="store.noise" type="range" min="0" max="64" step="1" />
+        </div>
+        <div class="row">
+          <label>变换轮数 <span class="val">{{ store.rounds }}</span></label>
+          <input v-model.number="store.rounds" type="range" min="1" max="4" step="1" />
+        </div>
+        <div class="row inline">
+          <input id="sbox" v-model="store.sbox" type="checkbox" />
+          <label for="sbox">S 盒字节替换</label>
+        </div>
+        <div class="row inline">
+          <input id="rowshift" v-model="store.rowshift" type="checkbox" />
+          <label for="rowshift">行列循环移位</label>
+        </div>
+        <div class="row inline">
+          <input id="gperm" v-model="store.globalPerm" type="checkbox" />
+          <label for="gperm">全局像素置换（大图较慢）</label>
+        </div>
+      </template>
+
+      <!-- 覆盖图层参数：覆盖合成与混合方式共用 -->
+      <template v-if="store.mode !== 'scramble'">
         <div class="row">
           <label>覆盖不透明度 <span class="val">{{ Math.round(store.opacity * 100) }}%</span></label>
           <input v-model.number="store.opacity" type="range" min="0.5" max="1" step="0.05" />

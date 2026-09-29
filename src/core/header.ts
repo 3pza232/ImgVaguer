@@ -37,6 +37,8 @@ const FLAG_PACK = 2;
 const FLAG_FILE_PAYLOAD = 4;
 /** 可见像素即密文（像素级布局）：决定 MAC 覆盖像素还是载荷 */
 const FLAG_PIXEL_CIPHER = 8;
+/** 混合方式（密文 + 覆盖）；仅作模式标识，与 FLAG_OVERLAY 互斥 */
+const FLAG_HYBRID = 16;
 
 /**
  * 载荷形态：
@@ -121,7 +123,8 @@ export function buildMeta(f: MetaFields, payload: Uint8Array): Uint8Array {
   out.set(META_MAGIC, 0);
   let o = META_MAGIC.length;
   out[o++] =
-    (f.mode === 'scramble' ? 0 : FLAG_OVERLAY) |
+    (f.mode === 'overlay' ? FLAG_OVERLAY : 0) |
+    (f.mode === 'hybrid' ? FLAG_HYBRID : 0) |
     (f.pack ? FLAG_PACK : 0) |
     (f.payloadKind === 'file' ? FLAG_FILE_PAYLOAD : 0) |
     (f.pixelCipher ? FLAG_PIXEL_CIPHER : 0);
@@ -147,7 +150,8 @@ export function parseMeta(buf: Uint8Array): { fields: MetaFields; payload: Uint8
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   let o = META_MAGIC.length;
   const modeCode = buf[o++];
-  const mode: Mode = (modeCode & FLAG_OVERLAY) !== 0 ? 'overlay' : 'scramble';
+  const mode: Mode =
+    (modeCode & FLAG_HYBRID) !== 0 ? 'hybrid' : (modeCode & FLAG_OVERLAY) !== 0 ? 'overlay' : 'scramble';
   const pack = (modeCode & FLAG_PACK) !== 0;
   const payloadKind: PayloadKind = (modeCode & FLAG_FILE_PAYLOAD) !== 0 ? 'file' : 'mode';
   const pixelCipher = (modeCode & FLAG_PIXEL_CIPHER) !== 0;

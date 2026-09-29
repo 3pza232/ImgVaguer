@@ -50,14 +50,20 @@ import {
 } from '@/core/png';
 import { randomBytes } from '@/core/random';
 import { scrambleImage, unscrambleImage, type BlockSize, type ScrambleOptions } from '@/core/scramble';
+import { addStages, stageTimesOf, type StageTimes } from '@/core/stats';
 import { utf8Decode, utf8Encode } from '@/core/text';
-import type { ImgVaguerParams, Protection, Raster, ScrambleParams } from '@/core/types';
+import type { ImgVaguerParams, Protection, Raster, ScrambleKnobs } from '@/core/types';
 import { unzlibSync, zlibSync } from '../libs/fflate.js';
+
+/** 计时基准：Date.now 在桌面、App 与小程序运行时都可用（performance 在 App / 小程序不保证存在） */
+function now(): number {
+  return Date.now();
+}
 
 /** 载荷与元数据的 nonce 域 */
 const OVERLAY_DOMAIN = 0;
 const META_DOMAIN = 200;
-/** 全熵凭据的 HKDF 域标签，按用途隔离 */
+/** 全熵凭据的 HKDF 域标签，按用途隔离（与桌面端必须一致，否则跨端无法互解） */
 const KEYFILE_INFO = 'imgvaguer/v5/keyfile';
 const EMBEDDED_INFO = 'imgvaguer/v5/embedded';
 
@@ -88,6 +94,14 @@ export interface EncryptOutput {
   bytes: Uint8Array;
   outRaster: Raster;
   fields: MetaFields;
+  /** 本次加密的分段耗时，供性能分析面板使用 */
+  timings: StageTimes;
+}
+
+/** 解密结果与分段耗时 */
+export interface DecryptOutput {
+  images: DecodedImage[];
+  timings: StageTimes;
 }
 
 /** 详情日志回调：向调用方（终端"详情"视图）输出内部步骤/参数 */
@@ -237,7 +251,7 @@ async function verifyMac(key: Uint8Array, data: Uint8Array, expect: Uint8Array):
   return timingSafeEqual(await hmacSha256(key, data), expect);
 }
 
-function scrambleOptions(p: ScrambleParams): ScrambleOptions {
+function scrambleOptions(p: ScrambleKnobs): ScrambleOptions {
   return {
     rounds: p.rounds ?? 1,
     globalPerm: p.globalPerm ?? false,
@@ -283,6 +297,8 @@ interface Assembled {
   p2: number;
   /** 可见像素即密文（像素级布局），决定 MAC 覆盖像素还是载荷 */
   pixelCipher: boolean;
+  /** 载荷与像素两段耗时；密钥派生与输出封装由调用方补齐 */
+  timings: StageTimes;
 }
 
 /**
@@ -298,13 +314,16 @@ async function assemble(
   trace?: Trace,
 ): Promise<Assembled> {
   const { width, height } = sources[0];
+  const tPayload = now();
+  const payload = await sealFiles(sources, session.keys, session.iv);
   const common = {
-    payload: await sealFiles(sources, session.keys, session.iv),
+    payload,
     payloadKind: 'file' as PayloadKind,
     level: LEVEL_COMPRESSED,
     p1: 0,
     p2: 0,
     pixelCipher: false,
+    timings: stageTimesOf({ payload: now() - tPayload }),
   };
   const label = pack ? `合并 ${sources.length} 张` : '单图';
 
@@ -313,29 +332,52 @@ async function assemble(
     const p1 = params.blockSize;
     const p2 = params.noise;
     if (params.layout === 'payload') {
+      const t = now();
       const outRaster = decoyRaster(width, height, common.payload.length, session.keys.noise, session.iv);
       trace?.(`[cipher] ${label} 可见图=装饰噪声 ${outRaster.width}x${outRaster.height} 载荷=原始文件`);
-      return { ...common, p1, p2, outRaster };
+      return { ...common, p1, p2, outRaster, timings: { ...common.timings, pixels: now() - t } };
     }
     trace?.(`[cipher] ${label} 可见图=像素密文 x${o.rounds} @block${params.blockSize}`);
+    const t = now();
     const visible = scrambleImage(await sources[0].raster(), session.keys, params.blockSize, params.noise, session.iv, o);
-    if (pack) return { ...common, p1, p2, outRaster: visible, pixelCipher: true };
+    const pixels = now() - t;
+    if (pack) return { ...common, p1, p2, outRaster: visible, pixelCipher: true, timings: { ...common.timings, pixels } };
     // 单图：可见像素即密文，无位图载荷，仅记录专业参数
-    return { outRaster: visible, payload: scrambleParams(o), payloadKind: 'mode', level: LEVEL_RAW, p1, p2, pixelCipher: true };
+    return {
+      outRaster: visible,
+      payload: scrambleParams(o),
+      payloadKind: 'mode',
+      level: LEVEL_RAW,
+      p1,
+      p2,
+      pixelCipher: true,
+      timings: { ...common.timings, pixels },
+    };
   }
 
+  // 覆盖合成与混合方式都需要覆盖图层
   if (!covers.length) throw new Error('需要至少一张覆盖图');
   for (const c of covers) {
     if (c.width !== width || c.height !== height) {
       throw new Error(pack ? '覆盖图尺寸需与首图一致' : '覆盖图尺寸需与目标一致');
     }
   }
-  trace?.(`[cipher] ${label} 可见图=覆盖合成 layers=${covers.length} opacity=${params.opacity}`);
+
+  const t = now();
+  const target = await sources[0].raster();
+  // 混合方式先做像素级密文混淆，再把覆盖层叠上去：覆盖层是门面，底下的像素已是噪声
+  const base = params.mode === 'hybrid' ? scrambleImage(target, session.keys, params.blockSize, params.noise, session.iv, scrambleOptions(params)) : target;
+  const visible = compositeLayers(base, covers, params.opacity, params.targetLayer ?? 0);
+  const pixels = now() - t;
+  trace?.(
+    `[cipher] ${label} 可见图=${params.mode === 'hybrid' ? `密文底图+覆盖 @block${params.blockSize}` : '覆盖合成'} layers=${covers.length} opacity=${params.opacity}`,
+  );
   return {
     ...common,
-    outRaster: compositeLayers(await sources[0].raster(), covers, params.opacity, params.targetLayer ?? 0),
+    outRaster: visible,
     p1: Math.round(params.opacity * 100),
     p2: params.fit === 'cover' ? 0 : 1,
+    timings: { ...common.timings, pixels },
   };
 }
 
@@ -360,7 +402,7 @@ async function finish(
     origHeight: origin.height,
   };
   const bytes = await seal(session, assembled.outRaster, assembled.payload, fields, assembled.level, assembled.pixelCipher, trace);
-  return { bytes, outRaster: assembled.outRaster, fields };
+  return { bytes, outRaster: assembled.outRaster, fields, timings: assembled.timings };
 }
 
 /**
@@ -376,9 +418,18 @@ export async function encryptImage(
   trace?: Trace,
 ): Promise<EncryptOutput> {
   validateIterations(params.iterations);
+  const tKdf = now();
   const session = await openSession(params.protection, params.password, params.iterations, extSeed, trace);
+  const kdf = now() - tKdf;
   const assembled = await assemble([source], params, covers, session, false, trace);
-  return finish(session, assembled, params, false, source, trace);
+  const tOut = now();
+  const out = await finish(session, assembled, params, false, source, trace);
+  return withTimings(out, kdf, now() - tOut);
+}
+
+/** 补齐密钥派生与输出封装两段耗时（这两段发生在 assemble 之外） */
+function withTimings(out: EncryptOutput, kdf: number, output: number): EncryptOutput {
+  return { ...out, timings: addStages(out.timings, stageTimesOf({ kdf, output })) };
 }
 
 /**
@@ -395,10 +446,14 @@ export async function encryptPack(
 ): Promise<EncryptOutput> {
   if (!sources.length) throw new Error('需要至少一张目标图');
   validateIterations(params.iterations);
+  const tKdf = now();
   const session = await openSession(params.protection, params.password, params.iterations, extSeed, trace);
+  const kdf = now() - tKdf;
   trace?.(`[pack] ${sources.map((s) => s.name).join(', ')}`);
   const assembled = await assemble(sources, params, covers, session, true, trace);
-  return finish(session, assembled, params, true, sources[0], trace);
+  const tOut = now();
+  const out = await finish(session, assembled, params, true, sources[0], trace);
+  return withTimings(out, kdf, now() - tOut);
 }
 
 /** 轻量探测：是否含有本工具数据块及其格式版本（不泄露任何加密内容） */
@@ -412,13 +467,14 @@ export function readHeader(bytes: Uint8Array): { version: number } | null {
  * 解密。像素从 PNG 内部无损解出，调用方无需预解码。
  * 依次尝试「密钥文件 / 口令 / 内嵌种子」三种凭据，由内部魔数判定成功者。
  * 载荷为原始文件字节时返回原文件；多图合并返回全部原文件。
+ * 结果连同分段耗时一起返回，供性能分析面板使用。
  */
-export async function decryptImage(
+export async function decryptImages(
   bytes: Uint8Array,
   password?: string,
   keySeed?: Uint8Array,
   trace?: Trace,
-): Promise<DecodedImage[]> {
+): Promise<DecryptOutput> {
   const chunk = extractPngChunk(bytes, CHUNK_TYPE);
   if (!chunk) throw new Error('未找到 ImgVaguer 数据块，非本工具生成');
   const c = parseChunk(chunk);
@@ -429,9 +485,12 @@ export async function decryptImage(
   const iv = c.salt.subarray(0, IV_LEN);
   // 像素按需解码：载荷级布局的明文全在载荷里，整幅解码只是白等
   let raster: Raster | null = null;
+  let pixelsMs = 0;
   const pixels = (): Raster => {
     if (!raster) {
+      const t = now();
       raster = decodePngRgba(bytes);
+      pixelsMs += now() - t;
       trace?.(`[in] 像素无损解码 ${raster.width}x${raster.height}`);
     }
     return raster;
@@ -445,6 +504,7 @@ export async function decryptImage(
 
   let keys: SubKeys | null = null;
   let meta: Uint8Array | null = null;
+  const tKdf = now();
   for (const { kind, secret } of labeled) {
     const master = await deriveMaster(kind, secret, c.salt, c.iterations);
     const k = await deriveSubKeys(master);
@@ -457,6 +517,7 @@ export async function decryptImage(
       break;
     }
   }
+  const kdfMs = now() - tKdf;
   if (!keys || !meta) {
     throw new Error(
       password || keySeed
@@ -475,15 +536,35 @@ export async function decryptImage(
   }
   trace?.(`[mac] HMAC-SHA256 校验通过（${fields.pixelCipher ? '像素密文' : '加密载荷'}）`);
 
-  // 位图载荷：单图、多图合并、覆盖合成的载荷都是原始文件字节（单图即 count = 1）
+  // 位图载荷：单图、多图合并、覆盖合成、混合方式的载荷都是原始文件字节（单图即 count = 1）
   if (fields.payloadKind === 'file') {
+    const t = now();
     const files = unpackImages(openPayload(payload, keys, iv));
+    const payloadMs = now() - t;
     trace?.(`[payload] 还原原始文件 ${files.length} 项`);
-    return files;
+    return { images: files, timings: stageTimesOf({ kdf: kdfMs, payload: payloadMs, pixels: pixelsMs }) };
   }
 
   // 像素级布局：可见像素即密文，载荷只带专业参数
   if (!BLOCK_SIZES.includes(fields.p1)) throw new Error('非法的分块尺寸');
+  const t = now();
   const restored = unscrambleImage(pixels(), keys, fields.p1 as BlockSize, fields.p2, iv, parseScrambleOpts(payload));
-  return [{ name: '', raster: restored }];
+  pixelsMs += now() - t;
+  return {
+    images: [{ name: '', raster: restored }],
+    timings: stageTimesOf({ kdf: kdfMs, payload: 0, pixels: pixelsMs }),
+  };
+}
+
+/**
+ * 便捷封装：只关心还原结果时用这个。
+ * 需要分段耗时（性能分析）时调用 decryptImages。
+ */
+export async function decryptImage(
+  bytes: Uint8Array,
+  password?: string,
+  keySeed?: Uint8Array,
+  trace?: Trace,
+): Promise<DecodedImage[]> {
+  return (await decryptImages(bytes, password, keySeed, trace)).images;
 }

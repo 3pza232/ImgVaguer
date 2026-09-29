@@ -1,4 +1,5 @@
 /** 轻量响应式会话状态 + localStorage 设置持久化（不引入 Pinia，保持低依赖） */
+import type { BatchStats } from '@/core/stats';
 import type { Mode, Protection, Raster, ScrambleLayout } from '@/core/types';
 import { reactive, watch } from 'vue';
 
@@ -41,10 +42,12 @@ export interface ResultItem {
   error?: string;
 }
 
-/** 单次执行产生的整批结果（含该批密钥文件） */
+/** 单次执行产生的整批结果（含该批密钥文件与性能台账） */
 export interface ResultBatch {
   items: ResultItem[];
   keyFile: KeyFileRef | null;
+  /** 该批的性能台账；执行中或空批为 null，界面据此决定是否显示性能分析 */
+  stats: BatchStats | null;
 }
 
 export type LogLevel = 'info' | 'detail';

@@ -55,13 +55,13 @@ types/       全局类型声明（uni / wx / plus）
 
 ## 版本
 
-当前 **0.3.0**。版本号在两处维护且需保持一致：`app-meta.ts` 的 `APP_VERSION` 与 `manifest.json` 的 `versionName` / `versionCode`。
+当前 **0.3.1**。版本号在两处维护且需保持一致：`app-meta.ts` 的 `APP_VERSION` 与 `manifest.json` 的 `versionName` / `versionCode`。
 
 批量上限区间由 `stores/session.ts` 的 `TARGET_MIN` / `TARGET_MAX` / `COVER_MIN` / `COVER_MAX` 定义，设置界面与使用文档均引用这些常量，改档位只需改常量。
 
 ## 文档
 
-应用内：**设置 → 打开使用文档**（快速上手 / 混淆方式 / 保护方式 / 参数 / 安全模型 / 强度评估 / 使用建议 / 注意事项）。
+应用内：**设置 → 打开使用文档**（快速上手 / 名词解释 / 混淆方式 / 保护方式 / 参数 / 安全模型 / 强度评估 / 使用建议 / 注意事项）。
 
 ## 质量校验
 

@@ -395,6 +395,15 @@ input[type="range"]::-moz-range-thumb {
   flex-direction: column;
   overflow: hidden;
 }
+/* 性能分析：比文档更宽，四个数字框与构成图才排得开；正文自行滚动，标题常驻 */
+.modal.stats {
+  width: 880px;
+  max-width: 94vw;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 
 .set-sec { margin-bottom: 14px; }
 .set-label { color: var(--dim); margin-bottom: 6px; }
@@ -526,6 +535,21 @@ input[type="range"]::-moz-range-thumb {
   vertical-align: middle;
 }
 .del-x:hover { opacity: 0.7; }
+
+/* 性能分析入口：与删除按钮留出一段距离，避免误点 */
+.stats-btn {
+  margin-left: 18px;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--acc);
+  cursor: pointer;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.stats-btn:hover { color: var(--fg); }
 
 /* 终端清除：空心红框 + 红 × */
 .clear-x {

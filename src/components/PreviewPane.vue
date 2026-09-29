@@ -11,9 +11,9 @@ const outputImages = computed<StackImage[]>(() => {
   if (!batch) return [];
   return batch.items.filter((r) => r.ok).map((r) => ({ url: r.url, name: r.name }));
 });
-// 覆盖合成且处于加密操作时，INPUT 上以 PiP 显示覆盖图层（上层在前）
+// 需要覆盖图层的混淆方式（覆盖合成、密文 + 覆盖）在加密时，INPUT 上以 PiP 显示图层（上层在前）
 const coverImages = computed<StackImage[]>(() => {
-  if (store.op !== 'encrypt' || store.mode !== 'overlay') return [];
+  if (store.op !== 'encrypt' || store.mode === 'scramble') return [];
   return [...store.covers].reverse().map((c) => ({ url: c.url, name: c.name }));
 });
 </script>

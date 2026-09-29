@@ -1,4 +1,5 @@
 /** 轻量响应式会话状态 + uni 存储持久化（结构对齐桌面版，去掉 DOM 专属字段） */
+import type { BatchStats } from '@/core/stats';
 import type { Mode, Protection, Raster, ScrambleLayout } from '@/core/types';
 // 仅类型引用（编译期擦除）：设置中的导出目录由平台层定义
 import type { ExportTree } from '@/services/platform/app-storage';
@@ -18,7 +19,8 @@ interface PickedImage {
   height: number;
 }
 
-export type TargetItem = PickedImage;
+/** 目标图：额外记录原文件字节数（选择器未提供时为 0），供性能分析与合并体积预估 */
+export type TargetItem = PickedImage & { size: number };
 
 /** 混淆图层：持位图缓存，批量加密时同一层不会重复解码 */
 export interface CoverItem extends PickedImage {
@@ -42,6 +44,8 @@ export interface ResultItem {
 export interface ResultBatch {
   items: ResultItem[];
   keyFile: KeyFileRef | null;
+  /** 该批的性能台账；执行中或空批为 null，界面据此决定是否显示性能分析 */
+  stats: BatchStats | null;
 }
 
 export type LogLevel = 'info' | 'detail';

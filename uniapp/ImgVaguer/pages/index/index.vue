@@ -9,6 +9,7 @@ import ImageZoom from '@/components/ImageZoom.vue';
 import LogDrawer from '@/components/LogDrawer.vue';
 import SegBar from '@/components/SegBar.vue';
 import StackPreview from '@/components/StackPreview.vue';
+import StatsPanel from '@/components/StatsPanel.vue';
 import ThumbStrip from '@/components/ThumbStrip.vue';
 import ToggleSwitch from '@/components/ToggleSwitch.vue';
 import {
@@ -87,6 +88,7 @@ const opOptions = [
 const modeOptions = [
   { value: 'scramble', label: '密文混淆' },
   { value: 'overlay', label: '覆盖合成' },
+  { value: 'hybrid', label: '密文+覆盖' },
 ];
 const layoutOptions = [
   { value: 'payload', label: '载荷级' },
@@ -192,23 +194,23 @@ const resStyle = computed(() => {
 /** 缩略图条用（小图，列表滚动轻量） */
 // 预览直接用原图路径：不为预览再解码编码一遍，也避开原生画布的尺寸限制
 const inputThumbs = computed(() => store.targets.map((t) => ({ src: t.path, name: t.name })));
+/**
+ * 混淆图层自上而下显示，L1 即顶层——与「目标图所在层」的自上而下编号一致。
+ * 存储序是下层在前，故这里反序输出；层序调整时再把序号换算回去。
+ */
 const coverThumbs = computed(() =>
-  store.op === 'encrypt' && store.mode === 'overlay'
-    ? store.covers.map((c) => ({ src: c.path, name: c.name }))
-    : [],
+  showCovers.value ? store.covers.map((c) => ({ src: c.path, name: c.name })).reverse() : [],
 );
 /** 堆叠预览与放大用（大图，避免放大发糊） */
 const inputImages = computed(() => store.targets.map((t) => ({ src: t.path, name: t.name })));
 const coverImages = computed(() =>
-  store.op === 'encrypt' && store.mode === 'overlay'
-    ? store.covers.map((c) => ({ src: c.path, name: c.name }))
-    : [],
+  showCovers.value ? store.covers.map((c) => ({ src: c.path, name: c.name })).reverse() : [],
 );
 const outputImages = computed(() =>
   (batch.value?.items ?? []).filter((i) => i.ok).map((i) => ({ src: i.preview, name: i.name })),
 );
 
-const showCovers = computed(() => store.op === 'encrypt' && store.mode === 'overlay');
+const showCovers = computed(() => store.op === 'encrypt' && store.mode !== 'scramble');
 const execLabel = computed(() => (store.op === 'encrypt' ? '[ 执行加密 ]' : '[ 执行解密 ]'));
 /** 执行中的按钮文案：只说明在做什么，细节留给日志 */
 const busyLabels: Record<BusyTask, string> = { encrypt: '加密中…', decrypt: '解密中…', export: '导出中…' };
@@ -276,11 +278,18 @@ function previewCovers(index: number): void {
   openZoom(coverImages.value.map((c) => c.src), index);
 }
 
-/** 层序调整：操作后给一次轻震动反馈（H5 等不支持时静默忽略） */
+/**
+ * 层序调整：列表自上而下（L1 顶层）与存储序相反，故先把显示序号换回存储下标；
+ * 操作后给一次轻震动反馈（H5 等不支持时静默忽略）。
+ */
 function onMoveCover(from: number, to: number): void {
-  moveCover(from, to);
+  const last = store.covers.length - 1;
+  moveCover(last - from, last - to);
   uni.vibrateShort({ fail: () => undefined });
 }
+
+/** 性能分析浮层：跟随结果区的批次 */
+const statsOpen = ref(false);
 
 /** 结果缩略图放大预览：以 OUTPUT 图集为序列，可左右滑动查看全部结果 */
 function previewResult(index: number): void {
@@ -422,6 +431,9 @@ export default {
       <view v-if="store.op === 'encrypt'" class="block">
         <view class="title">─ 混淆方式</view>
         <SegBar v-model="store.mode" :options="modeOptions" />
+        <text v-if="store.mode === 'hybrid'" class="hint">
+          先做密文混淆，再叠加混淆图层：看到的是图层，图层之下是密文噪声。
+        </text>
       </view>
 
       <!-- 保护方式 / 凭据 -->
@@ -494,65 +506,68 @@ export default {
           <text v-if="store.layout === 'payload'" class="hint">
             可见像素为块状噪声装饰图，原图经压缩加密存于数据块，体积约为像素级的 1/2。
           </text>
-          <template v-else>
-            <view class="row-between">
-              <text class="hint">噪声强度</text>
-              <text class="val">{{ store.noise }}</text>
-            </view>
-            <slider
-              :value="store.noise"
-              :min="0"
-              :max="64"
-              :step="1"
-              activeColor="#93c572"
-              backgroundColor="#243020"
-              block-size="20"
-              @change="store.noise = onSliderValue($event)"
-            />
-            <view class="row-between">
-              <text class="hint">变换轮数</text>
-              <text class="val">{{ store.rounds }}</text>
-            </view>
-            <slider
-              :value="store.rounds"
-              :min="1"
-              :max="4"
-              :step="1"
-              activeColor="#93c572"
-              backgroundColor="#243020"
-              block-size="20"
-              @change="store.rounds = onSliderValue($event)"
-            />
-            <view class="row-between">
-              <text class="hint">分块尺寸</text>
-              <view class="chips-inline">
-                <text
-                  v-for="b in [8, 16, 32]"
-                  :key="b"
-                  class="chip"
-                  :class="{ on: store.blockSize === b }"
-                  @click="store.blockSize = b as 8 | 16 | 32"
-                >
-                  {{ b }}px
-                </text>
-              </view>
-            </view>
-            <view class="row-between">
-              <text class="hint">S 盒字节替换</text>
-              <ToggleSwitch v-model="store.sbox" />
-            </view>
-            <view class="row-between">
-              <text class="hint">行列循环移位</text>
-              <ToggleSwitch v-model="store.rowshift" />
-            </view>
-            <view class="row-between">
-              <text class="hint">全局像素置换（大图较慢）</text>
-              <ToggleSwitch v-model="store.globalPerm" />
-            </view>
-          </template>
         </template>
 
-        <template v-else>
+        <!-- 像素变换参数：混合方式恒定生效，密文混淆只在像素级布局下生效 -->
+        <template v-if="store.mode === 'hybrid' || (store.mode === 'scramble' && store.layout === 'pixel')">
+          <view class="row-between">
+            <text class="hint">噪声强度</text>
+            <text class="val">{{ store.noise }}</text>
+          </view>
+          <slider
+            :value="store.noise"
+            :min="0"
+            :max="64"
+            :step="1"
+            activeColor="#93c572"
+            backgroundColor="#243020"
+            block-size="20"
+            @change="store.noise = onSliderValue($event)"
+          />
+          <view class="row-between">
+            <text class="hint">变换轮数</text>
+            <text class="val">{{ store.rounds }}</text>
+          </view>
+          <slider
+            :value="store.rounds"
+            :min="1"
+            :max="4"
+            :step="1"
+            activeColor="#93c572"
+            backgroundColor="#243020"
+            block-size="20"
+            @change="store.rounds = onSliderValue($event)"
+          />
+          <view class="row-between">
+            <text class="hint">分块尺寸</text>
+            <view class="chips-inline">
+              <text
+                v-for="b in [8, 16, 32]"
+                :key="b"
+                class="chip"
+                :class="{ on: store.blockSize === b }"
+                @click="store.blockSize = b as 8 | 16 | 32"
+              >
+                {{ b }}px
+              </text>
+            </view>
+          </view>
+          <view class="row-between">
+            <text class="hint">S 盒字节替换</text>
+            <ToggleSwitch v-model="store.sbox" />
+          </view>
+          <view class="row-between">
+            <text class="hint">行列循环移位</text>
+            <ToggleSwitch v-model="store.rowshift" />
+          </view>
+          <view class="row-between">
+            <text class="hint">全局像素置换（大图较慢）</text>
+            <ToggleSwitch v-model="store.globalPerm" />
+          </view>
+        </template>
+
+        <!-- 覆盖图层参数：覆盖合成与混合方式共用 -->
+        <template v-if="store.mode !== 'scramble'">
           <view class="row-between">
             <text class="hint">覆盖不透明度</text>
             <text class="val">{{ Math.round(store.opacity * 100) }}%</text>
@@ -600,6 +615,7 @@ export default {
             <text class="pg-count">{{ store.batchIndex + 1 }}/{{ store.batches.length }}</text>
             <text class="pg" :class="{ off: store.batches.length < 2 }" @click="stepBatch(1)">›</text>
             <text class="link del" @click="removeBatch(store.batchIndex)">×</text>
+            <text v-if="batch.stats" class="link stats" @click="statsOpen = true">[ 性能分析 ]</text>
           </view>
         </view>
 
@@ -642,6 +658,8 @@ export default {
       </view>
 
       <LogDrawer />
+
+      <StatsPanel v-if="statsOpen && batch" :stats="batch.stats" @close="statsOpen = false" />
     </view>
 
     <!-- 底部常驻执行（含安全区） -->
@@ -757,6 +775,10 @@ export default {
 }
 .link.del {
   color: var(--err);
+}
+/* 性能分析入口：与删除按钮拉开距离，避免误点 */
+.link.stats {
+  margin-left: 40rpx;
 }
 .input {
   margin-top: 16rpx;

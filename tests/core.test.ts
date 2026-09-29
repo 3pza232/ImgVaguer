@@ -15,6 +15,7 @@ import {
 import { deriveMasterKey, deriveSubKeys, hkdfSha256, type SubKeys } from '@/core/kdf';
 import { generateKeyFile, KEY_MAGIC, parseKeyFile, randomKeySeed } from '@/core/keyfile';
 import { compositeLayers } from '@/core/overlay';
+import { composeSlices, formatBytes, formatMs, itemStat, shares, statRows, summarize } from '@/core/stats';
 import {
   decodePngRgba,
   encodePng,
@@ -25,7 +26,7 @@ import {
   unfilterScanlines,
 } from '@/core/png';
 import { scrambleImage, unscrambleImage, type BlockSize } from '@/core/scramble';
-import type { OverlayParams, Raster, ScrambleParams } from '@/core/types';
+import type { HybridParams, OverlayParams, Raster, ScrambleParams } from '@/core/types';
 import {
   decryptImage,
   encryptImage,
@@ -218,6 +219,15 @@ describe('overlay composite', () => {
     expect(compositeLayers(target, [c1, c2], 1, 0).data).toEqual(c2.data);
   });
 
+  it('层序：数组末位是顶层（图层条 L1 显示为末位）', () => {
+    const target = randomRaster(24, 24);
+    const bottom = opaqueRaster(24, 24);
+    const top = opaqueRaster(24, 24);
+    // 不透明度 1 时，结果就是最上面那一层：末位那个
+    expect(compositeLayers(target, [bottom, top], 1, 0).data).toEqual(top.data);
+    expect(compositeLayers(target, [top, bottom], 1, 0).data).toEqual(bottom.data);
+  });
+
   it('多层叠图：目标在最上层时保持可见', () => {
     const target = opaqueRaster(24, 24);
     const c1 = opaqueRaster(24, 24);
@@ -360,6 +370,75 @@ describe('keyfile', () => {
   });
 });
 
+describe('性能统计', () => {
+  it('份额用最大余数法补足到 100', () => {
+    expect(shares([1, 1, 1])).toEqual([34, 33, 33]);
+    expect(shares([1, 0, 0, 0])).toEqual([100, 0, 0, 0]);
+    expect(shares([0, 0, 0])).toEqual([0, 0, 0]);
+  });
+
+  it('汇总：批级开销 = 总耗时 − 各张耗时之和，且不出现负值', () => {
+    const s = summarize({
+      op: 'encrypt',
+      mode: 'scramble',
+      totalMs: 300,
+      items: [
+        itemStat({ name: 'a.png', inBytes: 100, outBytes: 200, ms: 100, pixels: 1000 }),
+        itemStat({ name: 'b.png', inBytes: 100, outBytes: 100, ms: 150, pixels: 2000, ok: false }),
+      ],
+    });
+    expect(s.itemMs).toBe(250);
+    expect(s.overheadMs).toBe(50);
+    expect(s.avgMs).toBe(125);
+    expect(s.maxMs).toBe(150);
+    expect(s.slowest?.name).toBe('b.png');
+    expect(s.sizeRatio).toBe(1.5);
+    expect(s.count).toBe(2);
+    expect(s.okCount).toBe(1);
+    expect(s.failCount).toBe(1);
+    // 时钟精度差异可能让各张之和略大于总耗时，此时开销夹到 0
+    const tight = summarize({
+      op: 'decrypt',
+      mode: null,
+      totalMs: 10,
+      items: [itemStat({ name: 'a', inBytes: 0, ms: 100 })],
+    });
+    expect(tight.overheadMs).toBe(0);
+  });
+
+  it('构成图切片：批级开销参与归一，份额合计仍为 100', () => {
+    const stats = {
+      op: 'decrypt' as const,
+      mode: null,
+      totalMs: 200,
+      items: [
+        itemStat({
+          name: 'a',
+          inBytes: 10,
+          outBytes: 20,
+          ms: 150,
+          pixels: 4,
+          stages: { kdf: 100, payload: 50, pixels: 0, output: 0 },
+        }),
+      ],
+    };
+    const summary = summarize(stats);
+    const slices = composeSlices(summary);
+    expect(slices.map((s) => s.key)).toEqual(['kdf', 'payload', 'pixels', 'output', 'overhead']);
+    expect(slices.reduce((n, s) => n + s.percent, 0)).toBe(100);
+    // 最慢的一张条长为满格
+    expect(statRows(stats, summary)[0].width).toBe(100);
+  });
+
+  it('字节与耗时格式化', () => {
+    expect(formatBytes(512)).toBe('512 B');
+    expect(formatBytes(2048)).toBe('2.0 KB');
+    expect(formatMs(8)).toBe('8.0 ms');
+    expect(formatMs(250)).toBe('250 ms');
+    expect(formatMs(2500)).toBe('2.50 s');
+  });
+});
+
 describe('engine', () => {
   const base = { iterations: 1000 };
   const scramble = (over: Partial<ScrambleParams> = {}): ScrambleParams => ({
@@ -367,6 +446,9 @@ describe('engine', () => {
   });
   const overlay = (over: Partial<OverlayParams> = {}): OverlayParams => ({
     ...base, mode: 'overlay', protection: 'none', password: '', opacity: 1, fit: 'cover', ...over,
+  });
+  const hybrid = (over: Partial<HybridParams> = {}): HybridParams => ({
+    ...base, mode: 'hybrid', protection: 'none', password: '', blockSize: 16, noise: 24, opacity: 1, fit: 'cover', ...over,
   });
 
   /** 加密输入：字节与位图都按需提供，模拟调用方的懒解码写法 */
@@ -619,6 +701,36 @@ describe('engine', () => {
     const out = await encryptPack(sources, scramble({ pack: true, layout: 'payload', protection: 'keyfile' }), [], seed);
     expect(out.outRaster.data).not.toEqual(first.data);
     await expectOriginal(await decryptImage(out.bytes, undefined, seed), sources);
+  });
+
+  it('混合方式：可见图为密文底图叠覆盖层，还原仍为原始文件', async () => {
+    const raster = randomRaster(24, 24);
+    const source = fileInput(raster, encodePng(raster), 'h.png');
+    const cover = opaqueRaster(24, 24);
+    const seed = randomKeySeed();
+    const out = await encryptImage(source, hybrid(), [cover], seed);
+    expect(out.fields.mode).toBe('hybrid');
+    // 可见像素被覆盖层改写，故载荷必须是原始文件字节才能无损还原
+    expect(out.fields.payloadKind).toBe('file');
+    expect(out.outRaster.data).toEqual(cover.data);
+    await expectOriginal(await decryptImage(out.bytes, undefined, seed), [source]);
+  });
+
+  it('混合方式：半透明覆盖之下是密文噪声，而非原图像素', async () => {
+    const raster = randomRaster(24, 24);
+    const source = fileInput(raster, encodePng(raster), 'h.png');
+    const cover = opaqueRaster(24, 24);
+    const seed = randomKeySeed();
+    // 同一枚种子：盐与 IV 相同，两种方式的差异只来自「底图是否被混淆」
+    const mixed = await encryptImage(source, hybrid({ opacity: 0.5 }), [cover], seed);
+    const plain = await encryptImage(source, overlay({ opacity: 0.5 }), [cover], seed);
+    expect(mixed.outRaster.data).not.toEqual(plain.outRaster.data);
+    await expectOriginal(await decryptImage(mixed.bytes, undefined, seed), [source]);
+  });
+
+  it('混合方式：缺少覆盖图时明确报错', async () => {
+    const raster = opaqueRaster(8, 8);
+    await expect(encryptImage(fileInput(raster, encodePng(raster)), hybrid())).rejects.toThrow('覆盖图');
   });
 
   it('多图合并（覆盖合成）：遮盖图不参与还原', async () => {

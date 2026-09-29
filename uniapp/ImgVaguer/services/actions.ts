@@ -6,9 +6,10 @@ import { toBase64 } from '@/core/base64';
 import { generateKeyFile, parseKeyFile, randomKeySeed } from '@/core/keyfile';
 import { encodePng } from '@/core/png';
 import { fitRaster, degradeRaster, thumbRaster } from '@/core/resize';
+import { emptyStats, itemStat, withOutputStage } from '@/core/stats';
 import type { ImgVaguerParams, Raster } from '@/core/types';
 import { detail, log, saveSettings, settings, store, type CoverItem, type KeyFileRef, type ResultBatch, type ResultItem, type TargetItem } from '@/stores/session';
-import { decryptImage, encryptImage, encryptPack, readHeader, type EncryptInput } from './engine';
+import { decryptImages, encryptImage, encryptPack, readHeader, type EncryptInput } from './engine';
 // #ifdef APP-PLUS
 import { utf8Decode } from '@/core/text';
 import { exportBytes, exportTextFile } from '@/services/export';
@@ -37,6 +38,7 @@ import { readClipboard } from './platform/save';
 /** 相册选择器单次可选张数上限（各端一致） */
 const PICK_MAX = 9;
 
+/** 混淆参数：按当前方式取用对应旋钮（混合方式两者都要） */
 function buildParams(): ImgVaguerParams {
   const base = {
     protection: store.protection,
@@ -44,26 +46,23 @@ function buildParams(): ImgVaguerParams {
     iterations: store.iterations,
     pack: store.pack,
   };
-  return store.mode === 'scramble'
-    ? {
-        ...base,
-        mode: 'scramble',
-        layout: store.layout,
-        blockSize: store.blockSize,
-        noise: store.noise,
-        rounds: store.rounds,
-        globalPerm: store.globalPerm,
-        sbox: store.sbox,
-        rowshift: store.rowshift,
-      }
-    : {
-        ...base,
-        mode: 'overlay',
-        opacity: store.opacity,
-        fit: store.fit,
-        targetLayer: store.targetLayer,
-        coverQuality: store.coverQuality,
-      };
+  const scramble = {
+    blockSize: store.blockSize,
+    noise: store.noise,
+    rounds: store.rounds,
+    globalPerm: store.globalPerm,
+    sbox: store.sbox,
+    rowshift: store.rowshift,
+  };
+  const overlay = {
+    opacity: store.opacity,
+    fit: store.fit,
+    targetLayer: store.targetLayer,
+    coverQuality: store.coverQuality,
+  };
+  if (store.mode === 'overlay') return { ...base, mode: 'overlay', ...overlay };
+  if (store.mode === 'hybrid') return { ...base, mode: 'hybrid', ...scramble, ...overlay };
+  return { ...base, mode: 'scramble', layout: store.layout, ...scramble };
 }
 
 function suffixed(name: string, suffix: string): string {
@@ -143,7 +142,7 @@ export async function pickTargets(): Promise<void> {
         log(`跳过 ${item.name}: ${item.width}x${item.height} 超过像素上限 ${(settings.maxPixels / 10000).toFixed(0)} 万（可在设置中调整）`);
         continue;
       }
-      store.targets.push(item);
+      store.targets.push({ ...item, size: f.size });
       log(`载入 ${item.name} (${item.width}x${item.height})`);
     } catch (e) {
       log(`跳过 ${f.name ?? fileNameOf(f.path)}: ${(e as Error).message}`);
@@ -311,9 +310,9 @@ function decodeCover(c: CoverItem): Promise<Raster> {
   return c.path.startsWith('data:') ? rasterFromDataUrl(c.path) : decodeRaster(c.path);
 }
 
-/** 依当前混淆层设置，把混淆图适配到目标尺寸 */
+/** 依当前混淆层设置，把混淆图适配到目标尺寸；密文混淆不需要图层 */
 async function buildCovers(params: ImgVaguerParams, width: number, height: number): Promise<Raster[]> {
-  if (params.mode !== 'overlay') return [];
+  if (params.mode === 'scramble') return [];
   const layers: Raster[] = [];
   for (const c of store.covers) {
     layers.push(degradeRaster(fitRaster(await coverRaster(c), width, height, params.fit), params.coverQuality ?? 1));
@@ -326,9 +325,14 @@ async function buildCovers(params: ImgVaguerParams, width: number, height: numbe
  * 注意：必须经 store 取回代理后再 push，直接写原始对象不会触发视图更新。
  */
 function newBatch(keyFile: KeyFileRef | null): ResultBatch {
-  store.batches.push({ items: [], keyFile });
+  store.batches.push({ items: [], keyFile, stats: null });
   store.batchIndex = store.batches.length - 1;
   return store.batches[store.batchIndex];
+}
+
+/** 本批原文件体积之和：原文件多已压缩，合并输出 ≈ 此值 */
+function totalSourceBytes(): number {
+  return store.targets.reduce((n, t) => n + t.size, 0);
 }
 
 /** 结果预览源：完整像素留在 bytes 中供导出，预览只取缩略尺寸以免放大发糊 */
@@ -339,7 +343,7 @@ async function previewOf(raster: Raster): Promise<string> {
 export async function runEncrypt(): Promise<void> {
   if (store.busy) return;
   if (!store.targets.length) return warn('未选择目标图像');
-  if (store.mode === 'overlay' && !store.covers.length) return warn('覆盖模式需要至少一张混淆图');
+  if (store.mode !== 'scramble' && !store.covers.length) return warn('该混淆方式需要至少一张混淆图');
   if (store.protection === 'password' && !store.password) return warn('已选择口令保护但未输入口令');
 
   store.busy = 'encrypt';
@@ -351,20 +355,25 @@ export async function runEncrypt(): Promise<void> {
       ? { name: 'imgvaguer-key.ivkey', text: await generateKeyFile(extSeed) }
       : null;
     const batch = newBatch(keyFile);
+    const stats = emptyStats('encrypt', params.mode);
     const pack = params.pack === true;
-    log(`开始加密 ${store.targets.length} 项 [${params.mode}/${store.protection}${pack ? '/合并' : ''}]`);
+    const estimate = pack ? totalSourceBytes() : 0;
+    log(`开始加密 ${store.targets.length} 项 [${params.mode}/${store.protection}${pack ? '/合并' : ''}]${estimate ? `，预计输出约 ${(estimate / 1048576).toFixed(1)}MB` : ''}`);
     let okCount = 0;
     const batchT0 = Date.now();
 
-    // 混淆图层只在覆盖合成中参与，故按需预热，避免无谓解码
-    if (params.mode === 'overlay') await warmCovers();
+    // 需要图层的混淆方式先预热解码：这份开销整批共用，从逐张耗时里摘出来单独说明
+    if (params.mode !== 'scramble') await warmCovers();
 
     if (pack) {
+      const inBytes = totalSourceBytes();
+      const pixels = store.targets.reduce((n, t) => n + t.width * t.height, 0);
+      const t0 = Date.now();
       try {
-        const t0 = Date.now();
         const first = store.targets[0];
         const sources = store.targets.map(inputOf);
         const out = await encryptPack(sources, params, await buildCovers(params, first.width, first.height), extSeed, detail);
+        const ms = Date.now() - t0;
         okCount = 1;
         batch.items.push({
           name: cipherName(first.name),
@@ -372,8 +381,19 @@ export async function runEncrypt(): Promise<void> {
           preview: await previewOf(out.outRaster),
           ok: true,
         });
-        log(`合并加密 ${store.targets.length} 张 -> ${(out.bytes.length / 1024).toFixed(1)}KB (${Date.now() - t0}ms)`);
+        stats.items.push(
+          itemStat({
+            name: `合并 ${store.targets.length} 张`,
+            inBytes,
+            outBytes: out.bytes.length,
+            ms,
+            pixels,
+            stages: withOutputStage(ms, out.timings),
+          }),
+        );
+        log(`合并加密 ${store.targets.length} 张 -> ${(out.bytes.length / 1024).toFixed(1)}KB (${ms}ms)`);
       } catch (e) {
+        stats.items.push(itemStat({ name: `合并 ${store.targets.length} 张`, inBytes, ms: Date.now() - t0, pixels, ok: false }));
         batch.items.push({ name: store.targets[0].name, bytes: null, preview: '', ok: false, error: (e as Error).message });
         log(`合并加密失败: ${(e as Error).message}`);
       }
@@ -383,6 +403,7 @@ export async function runEncrypt(): Promise<void> {
         const t0 = Date.now();
         try {
           const out = await encryptImage(inputOf(t), params, await buildCovers(params, t.width, t.height), extSeed, detail);
+          const ms = Date.now() - t0;
           okCount++;
           batch.items.push({
             name: cipherName(t.name),
@@ -390,8 +411,19 @@ export async function runEncrypt(): Promise<void> {
             preview: await previewOf(out.outRaster),
             ok: true,
           });
-          log(`加密 ${t.name} -> ${(out.bytes.length / 1024).toFixed(1)}KB (${Date.now() - t0}ms)`);
+          stats.items.push(
+            itemStat({
+              name: t.name,
+              inBytes: t.size,
+              outBytes: out.bytes.length,
+              ms,
+              pixels: t.width * t.height,
+              stages: withOutputStage(ms, out.timings),
+            }),
+          );
+          log(`加密 ${t.name} -> ${(out.bytes.length / 1024).toFixed(1)}KB (${ms}ms)`);
         } catch (e) {
+          stats.items.push(itemStat({ name: t.name, inBytes: t.size, ms: Date.now() - t0, pixels: t.width * t.height, ok: false }));
           batch.items.push({ name: t.name, bytes: null, preview: '', ok: false, error: (e as Error).message });
           log(`失败 ${t.name}: ${(e as Error).message}`);
         }
@@ -400,7 +432,9 @@ export async function runEncrypt(): Promise<void> {
     if (keyFile && okCount > 0) {
       log('密钥已生成：请在结果区导出并分开保管，丢失即无法还原');
     }
-    detail(`[batch] 加密完成 成功 ${okCount}/${store.targets.length} 项，总耗时 ${((Date.now() - batchT0) / 1000).toFixed(1)}s`);
+    stats.totalMs = Date.now() - batchT0;
+    batch.stats = stats;
+    detail(`[batch] 加密完成 成功 ${okCount}/${store.targets.length} 项，总耗时 ${(stats.totalMs / 1000).toFixed(1)}s`);
   } finally {
     store.busy = null;
   }
@@ -413,6 +447,7 @@ export async function runDecrypt(): Promise<void> {
   store.busy = 'decrypt';
   try {
     const batch = newBatch(null);
+    const stats = emptyStats('decrypt', null);
     log(`开始解密 ${store.targets.length} 项`);
     const batchT0 = Date.now();
     for (const t of store.targets) {
@@ -421,32 +456,45 @@ export async function runDecrypt(): Promise<void> {
         await yieldToUI();
         const bytes = await readFileBytes(t.path);
         if (!readHeader(bytes)) throw new Error('非 ImgVaguer 图像（可能被二次压缩，请用原始输出文件）');
-        const images = await decryptImage(bytes, store.password || undefined, store.keyFile?.seed, detail);
+        const { images, timings } = await decryptImages(bytes, store.password || undefined, store.keyFile?.seed, detail);
         const multi = images.length > 1;
+        let outBytes = 0;
         for (let i = 0; i < images.length; i++) {
           const img = images[i];
           const fallback = suffixed(t.name, multi ? `.${i + 1}.restored` : '.restored');
           if (img.bytes) {
             // 载荷为原始文件字节：直接还原原文件，名称与格式都不改写
             batch.items.push({ name: img.name || fallback, bytes: img.bytes, preview: await bytesToSrc(img.bytes, img.name), ok: true });
+            outBytes += img.bytes.length;
             continue;
           }
           if (!img.raster) continue;
-          batch.items.push({
-            name: `${img.name || fallback}.png`,
-            bytes: encodePng(img.raster),
-            preview: await previewOf(img.raster),
-            ok: true,
-          });
+          const png = encodePng(img.raster);
+          batch.items.push({ name: `${img.name || fallback}.png`, bytes: png, preview: await previewOf(img.raster), ok: true });
+          outBytes += png.length;
         }
-        log(`还原 ${t.name}${multi ? ` -> ${images.length} 张` : ''} (${Date.now() - t0}ms)`);
+        const ms = Date.now() - t0;
+        stats.items.push(
+          itemStat({
+            name: t.name,
+            inBytes: t.size,
+            outBytes,
+            ms,
+            pixels: t.width * t.height,
+            stages: withOutputStage(ms, timings),
+          }),
+        );
+        log(`还原 ${t.name}${multi ? ` -> ${images.length} 张` : ''} (${ms}ms)`);
       } catch (e) {
+        stats.items.push(itemStat({ name: t.name, inBytes: t.size, ms: Date.now() - t0, pixels: t.width * t.height, ok: false }));
         batch.items.push({ name: t.name, bytes: null, preview: '', ok: false, error: (e as Error).message });
         log(`失败 ${t.name}: ${(e as Error).message}`);
       }
     }
-    const ok = batch.items.filter((i) => i.ok).length;
-    detail(`[batch] 解密完成 成功 ${ok}/${store.targets.length} 项，总耗时 ${((Date.now() - batchT0) / 1000).toFixed(1)}s`);
+    const ok = stats.items.filter((i) => i.ok).length;
+    stats.totalMs = Date.now() - batchT0;
+    batch.stats = stats;
+    detail(`[batch] 解密完成 成功 ${ok}/${store.targets.length} 项，总耗时 ${(stats.totalMs / 1000).toFixed(1)}s`);
   } finally {
     store.busy = null;
   }
